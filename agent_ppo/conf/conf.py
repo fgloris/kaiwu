@@ -21,7 +21,7 @@ class Config:
         2,   # 宝箱特征（最近一个）
         2,   # buff特征（最近一个）
         16,  # 局部地图
-        8,   # 合法动作mask
+        16,   # 合法动作mask
         2,   # 进度特征
     ]
     FEATURE_SPLIT_SHAPE = FEATURES
@@ -29,7 +29,7 @@ class Config:
     DIM_OF_OBSERVATION = FEATURE_LEN
 
     # Action space / 动作空间：8个移动方向
-    ACTION_NUM = 8
+    ACTION_NUM = 16
 
     # Value head / 价值头：单头生存奖励
     VALUE_NUM = 1

@@ -44,6 +44,7 @@ class Preprocessor:
         self.last_total_score = 0.0
         self.last_treasure_collected = 0
         self.last_collected_buff = 0
+        self.last_flash_count = 0
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -98,7 +99,7 @@ class Preprocessor:
                     np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm, dir_norm], dtype=np.float32)
                 )
             else:
-                monster_feats.append(np.zeros(5, dtype=np.float32))
+                monster_feats.append(np.zeros(6, dtype=np.float32))
 
         # Organ features
         organs = frame_state.get("organs", [])
@@ -153,17 +154,17 @@ class Preprocessor:
                     flat_idx += 1
 
         # Legal action mask (8D) / 合法动作掩码
-        legal_action = [1] * 8
+        legal_action = [1] * 16
         if isinstance(legal_act_raw, list) and legal_act_raw:
             if isinstance(legal_act_raw[0], bool):
-                for j in range(min(8, len(legal_act_raw))):
+                for j in range(min(16, len(legal_act_raw))):
                     legal_action[j] = int(legal_act_raw[j])
             else:
-                valid_set = {int(a) for a in legal_act_raw if int(a) < 8}
-                legal_action = [1 if j in valid_set else 0 for j in range(8)]
+                valid_set = {int(a) for a in legal_act_raw if int(a) < 16}
+                legal_action = [1 if j in valid_set else 0 for j in range(16)]
 
         if sum(legal_action) == 0:
-            legal_action = [1] * 8
+            legal_action = [1] * 16
 
         # Progress features (2D) / 进度特征
         cur_min_dist_norm = 1.0
@@ -207,19 +208,24 @@ class Preprocessor:
         treasure_gain = cur_treasure_collected - self.last_treasure_collected
         self.last_treasure_collected = cur_treasure_collected
 
-        treasure_reward = 0.5 * max(0, treasure_gain)
+        treasure_reward = max(0, treasure_gain)
 
         # 4) buff收集奖励
         cur_collected_buff = int(env_info.get("collected_buff", 0))
         buff_gain = cur_collected_buff - self.last_collected_buff
         self.last_collected_buff = cur_collected_buff
 
-        buff_reward = 0.3 * max(0, buff_gain)
+        buff_reward = max(0, buff_gain)
 
-        score_reward = score_gain
+        # 5) 闪现释放奖励
+        flash_count = env_info.get("flash_count", 0)
+        flash_gain = flash_count - self.last_flash_count
+        self.last_flash_count = flash_count
+
+        flash_reward = max(0, flash_gain)
 
         # final step reward scalar
-        reward_scalar = 1.0 * score_reward + survive_reward + 0.1 * dist_shaping + 0.5 * treasure_reward + 0.3 * buff_reward
+        reward_scalar = 1.0 * score_gain + survive_reward + 0.1 * dist_shaping + 0.5 * treasure_reward + 0.3 * buff_reward + 0.3 * flash_reward
         reward = [reward_scalar]
 
         return feature, legal_action, reward
