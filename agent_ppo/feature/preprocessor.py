@@ -41,6 +41,7 @@ class Preprocessor:
         self.step_no = 0
         self.max_step = 200
         self.last_min_monster_dist_norm = 0.5
+        self.last_total_score = 0.0
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -145,6 +146,16 @@ class Preprocessor:
 
         self.last_min_monster_dist_norm = cur_min_dist_norm
 
-        reward = [survive_reward + dist_shaping]
+        # score-based reward / 基于比赛分数增量的奖励
+        env_info = env_obs["observation"].get("env_info", {})
+        cur_total_score = float(env_info.get("total_score", 0.0))
+        score_gain = cur_total_score - self.last_total_score
+        self.last_total_score = cur_total_score
+
+        score_reward = np.clip(score_gain, -1.0, 1.0)
+
+        # final step reward scalar
+        reward_scalar = 1.0 * score_reward + 0.01 * survive_reward + 0.05 * dist_shaping
+        reward = [reward_scalar]
 
         return feature, legal_action, reward

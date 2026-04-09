@@ -131,7 +131,7 @@ class EpisodeRunner:
                         final_reward[0] = -10.0
                         result_str = "FAIL"
                     else:
-                        final_reward[0] = 10.0
+                        final_reward[0] = 10.0 # 0.01 * total_score
                         result_str = "WIN"
 
                     self.logger.info(
