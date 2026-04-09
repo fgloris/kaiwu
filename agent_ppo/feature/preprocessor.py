@@ -136,7 +136,7 @@ class Preprocessor:
             buff_feat = np.array(
                 [
                     _norm(nearest_buff.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
-                    _norm(nearest_buff.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
+                    _norm(nearest_buff.get("hero_relative_direction", 0), 8.0),
                 ],
                 dtype=np.float32,
             )
@@ -172,8 +172,9 @@ class Preprocessor:
                 cur_min_dist_norm = min(cur_min_dist_norm, m_feat[4])
 
         step_norm = _norm(self.step_no, self.max_step)
+        progress_treasure_collect = _norm(int(hero.get("treasure_collected_count", 0)), 10)
         #survival_ratio = step_norm * (0.5 + 0.5 * cur_min_dist_norm)
-        progress_feat = np.array([step_norm], dtype=np.float32)
+        progress_feat = np.array([step_norm, progress_treasure_collect], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         feature = np.concatenate(
