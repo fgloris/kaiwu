@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
 
-from agent_ppo_strong.conf.conf import Config
+from agent_ppo.conf.conf import Config
 
 
 TARGET_KEYWORDS = (

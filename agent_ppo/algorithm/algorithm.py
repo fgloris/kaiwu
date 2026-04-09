@@ -8,7 +8,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from agent_ppo_strong.conf.conf import Config
+from agent_ppo.conf.conf import Config
 
 
 class Algorithm:

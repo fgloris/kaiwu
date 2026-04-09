@@ -5,8 +5,8 @@ import os
 import time
 
 import numpy as np
-from agent_ppo_strong.conf.conf import Config
-from agent_ppo_strong.feature.definition import SampleData, sample_process
+from agent_ppo.conf.conf import Config
+from agent_ppo.feature.definition import SampleData, sample_process
 from tools.metrics_utils import get_training_metrics
 from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
@@ -17,9 +17,9 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     env = envs[0]
     agent = agents[0]
 
-    usr_conf = read_usr_conf("agent_ppo_strong/conf/train_env_conf.toml", logger)
+    usr_conf = read_usr_conf("agent_ppo/conf/train_env_conf.toml", logger)
     if usr_conf is None:
-        logger.error("usr_conf is None, please check agent_ppo_strong/conf/train_env_conf.toml")
+        logger.error("usr_conf is None, please check agent_ppo/conf/train_env_conf.toml")
         return
 
     episode_runner = EpisodeRunner(env=env, agent=agent, usr_conf=usr_conf, logger=logger, monitor=monitor)

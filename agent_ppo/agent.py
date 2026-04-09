@@ -6,11 +6,11 @@ import torch
 
 from kaiwudrl.interface.agent import BaseAgent
 
-from agent_ppo_strong.algorithm.algorithm import Algorithm
-from agent_ppo_strong.conf.conf import Config
-from agent_ppo_strong.feature.definition import ActData, ObsData
-from agent_ppo_strong.feature.preprocessor import Preprocessor
-from agent_ppo_strong.model.model import Model
+from agent_ppo.algorithm.algorithm import Algorithm
+from agent_ppo.conf.conf import Config
+from agent_ppo.feature.definition import ActData, ObsData
+from agent_ppo.feature.preprocessor import Preprocessor
+from agent_ppo.model.model import Model
 
 
 torch.set_num_threads(1)

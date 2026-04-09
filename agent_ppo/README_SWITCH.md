@@ -1,4 +1,4 @@
-# agent_ppo_strong
+# agent_ppo
 
 这是一个可直接替换的更稳 PPO 版本，主要改动：
 
@@ -24,10 +24,10 @@ train_workflow = "agent_ppo.workflow.train_workflow.workflow"
 改成：
 
 ```toml
-actor_agent = "agent_ppo_strong.agent.Agent"
-learner_agent = "agent_ppo_strong.agent.Agent"
-aisrv_agent = "agent_ppo_strong.agent.Agent"
-train_workflow = "agent_ppo_strong.workflow.train_workflow.workflow"
+actor_agent = "agent_ppo.agent.Agent"
+learner_agent = "agent_ppo.agent.Agent"
+aisrv_agent = "agent_ppo.agent.Agent"
+train_workflow = "agent_ppo.workflow.train_workflow.workflow"
 ```
 
 如果想进一步增加采样稳定性，可以同时把 `conf/configure_app.toml` 里的：

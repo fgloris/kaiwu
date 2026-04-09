@@ -4,7 +4,7 @@
 import torch
 import torch.nn as nn
 
-from agent_ppo_strong.conf.conf import Config
+from agent_ppo.conf.conf import Config
 
 
 class ResidualMLPBlock(nn.Module):
@@ -31,7 +31,7 @@ class ResidualMLPBlock(nn.Module):
 class Model(nn.Module):
     def __init__(self, device=None):
         super().__init__()
-        self.model_name = "gorge_chase_ppo_strong"
+        self.model_name = "gorge_chase_ppo"
         self.device = device
         input_dim = Config.DIM_OF_OBSERVATION
         hidden_dim = Config.HIDDEN_DIM

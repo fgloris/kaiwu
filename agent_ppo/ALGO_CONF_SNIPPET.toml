@@ -1,7 +1,7 @@
-[ppo_strong]
-actor_agent = "agent_ppo_strong.agent.Agent"
-learner_agent = "agent_ppo_strong.agent.Agent"
-aisrv_agent = "agent_ppo_strong.agent.Agent"
-train_workflow = "agent_ppo_strong.workflow.train_workflow.workflow"
+[ppo]
+actor_agent = "agent_ppo.agent.Agent"
+learner_agent = "agent_ppo.agent.Agent"
+aisrv_agent = "agent_ppo.agent.Agent"
+train_workflow = "agent_ppo.workflow.train_workflow.workflow"
 eval_workflow = "tools.eval.workflow.eval_workflow.workflow"
 exam_workflow = "tools.eval.workflow.exam_workflow.workflow"

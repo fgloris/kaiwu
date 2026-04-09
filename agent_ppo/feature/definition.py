@@ -2,7 +2,7 @@
 # -*- coding: UTF-8 -*-
 
 from common_python.utils.common_func import create_cls
-from agent_ppo_strong.conf.conf import Config
+from agent_ppo.conf.conf import Config
 
 ObsData = create_cls("ObsData", feature=None, legal_action=None)
 ActData = create_cls("ActData", action=None, d_action=None, prob=None, value=None)
