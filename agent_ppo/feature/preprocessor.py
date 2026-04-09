@@ -79,12 +79,12 @@ class Preprocessor:
                 # {'hero_l2_distance': 0, 'hero_relative_direction': 2, 'monster_id': 14, 'monster_interval': 300, 'pos': {'x': 105, 'z': 56}, 'speed': 1, 'is_in_view': 1}
                 is_in_view = float(m.get("is_in_view", 0))
                 m_pos = m["pos"]
+                dir_norm = _norm(m.get("hero_relative_direction", 0), 8.0)
+
                 if is_in_view:
                     m_x_norm = _norm(m_pos["x"], MAP_SIZE)
                     m_z_norm = _norm(m_pos["z"], MAP_SIZE)
                     m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED)
-                    dir_norm = _norm(m.get("hero_relative_direction", 0), 8.0)
-
                     # Euclidean distance / 欧式距离
                     raw_dist = np.sqrt((hero_pos["x"] - m_pos["x"]) ** 2 + (hero_pos["z"] - m_pos["z"]) ** 2)
                     dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
@@ -93,6 +93,7 @@ class Preprocessor:
                     m_z_norm = 0.0
                     m_speed_norm = 0.0
                     dist_norm = 1.0
+                    
                 monster_feats.append(
                     np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm, dir_norm], dtype=np.float32)
                 )
@@ -171,8 +172,8 @@ class Preprocessor:
                 cur_min_dist_norm = min(cur_min_dist_norm, m_feat[4])
 
         step_norm = _norm(self.step_no, self.max_step)
-        survival_ratio = step_norm * (0.5 + 0.5 * cur_min_dist_norm)
-        progress_feat = np.array([step_norm, survival_ratio], dtype=np.float32)
+        #survival_ratio = step_norm * (0.5 + 0.5 * cur_min_dist_norm)
+        progress_feat = np.array([step_norm], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         feature = np.concatenate(
