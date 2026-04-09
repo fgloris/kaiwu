@@ -15,12 +15,14 @@ class Config:
 
     # Feature dimensions / 特征维度（共40维）
     FEATURES = [
-        4,
-        5,
-        5,
-        16,
-        8,
-        2,
+        4,   # 鲁班自身
+        6,   # 怪物1
+        6,   # 怪物2
+        2,   # 宝箱特征（最近一个）
+        2,   # buff特征（最近一个）
+        16,  # 局部地图
+        8,   # 合法动作mask
+        2,   # 进度特征
     ]
     FEATURE_SPLIT_SHAPE = FEATURES
     FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)

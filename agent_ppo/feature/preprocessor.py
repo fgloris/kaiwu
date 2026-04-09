@@ -73,12 +73,15 @@ class Preprocessor:
         for i in range(2):
             if i < len(monsters):
                 m = monsters[i]
+                # 当 is_in_view = 0 时，仅有 hero_relative_direction 有效
+                # {'hero_l2_distance': 0, 'hero_relative_direction': 2, 'monster_id': 14, 'monster_interval': 300, 'pos': {'x': 105, 'z': 56}, 'speed': 1, 'is_in_view': 1}
                 is_in_view = float(m.get("is_in_view", 0))
                 m_pos = m["pos"]
                 if is_in_view:
                     m_x_norm = _norm(m_pos["x"], MAP_SIZE)
                     m_z_norm = _norm(m_pos["z"], MAP_SIZE)
                     m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED)
+                    dir_norm = _norm(m.get("hero_relative_direction", 0), 8.0)
 
                     # Euclidean distance / 欧式距离
                     raw_dist = np.sqrt((hero_pos["x"] - m_pos["x"]) ** 2 + (hero_pos["z"] - m_pos["z"]) ** 2)
@@ -89,10 +92,51 @@ class Preprocessor:
                     m_speed_norm = 0.0
                     dist_norm = 1.0
                 monster_feats.append(
-                    np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm], dtype=np.float32)
+                    np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm, dir_norm], dtype=np.float32)
                 )
             else:
                 monster_feats.append(np.zeros(5, dtype=np.float32))
+
+        # Organ features
+        organs = frame_state.get("organs", [])
+
+        treasure_feat = np.array([1.0, 0.0], dtype=np.float32)
+        buff_feat = np.array([1.0, 0.0], dtype=np.float32)
+
+        nearest_treasure = None
+        nearest_buff = None
+
+        for organ in organs:
+            if organ.get("status", 0) != 1:
+                continue
+
+            sub_type = organ.get("sub_type", 0)
+            dist_bucket = organ.get("hero_l2_distance", MAX_DIST_BUCKET)
+
+            if sub_type == 1:
+                if nearest_treasure is None or dist_bucket < nearest_treasure["hero_l2_distance"]:
+                    nearest_treasure = organ
+            elif sub_type == 2:
+                if nearest_buff is None or dist_bucket < nearest_buff["hero_l2_distance"]:
+                    nearest_buff = organ
+
+        if nearest_treasure is not None:
+            treasure_feat = np.array(
+                [
+                    _norm(nearest_treasure.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
+                    _norm(nearest_treasure.get("hero_relative_direction", 0), 8.0),
+                ],
+                dtype=np.float32,
+            )
+
+        if nearest_buff is not None:
+            buff_feat = np.array(
+                [
+                    _norm(nearest_treasure.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
+                    _norm(nearest_buff.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
+                ],
+                dtype=np.float32,
+            )
 
         # Local map features (16D) / 局部地图特征
         map_feat = np.zeros(16, dtype=np.float32)
@@ -120,7 +164,7 @@ class Preprocessor:
 
         # Progress features (2D) / 进度特征
         step_norm = _norm(self.step_no, self.max_step)
-        survival_ratio = step_norm
+        survival_ratio = step_norm * (0.5 + 0.5 * cur_min_dist_norm)
         progress_feat = np.array([step_norm, survival_ratio], dtype=np.float32)
 
         # Concatenate features / 拼接特征
@@ -129,6 +173,8 @@ class Preprocessor:
                 hero_feat,
                 monster_feats[0],
                 monster_feats[1],
+                treasure_feat,
+                buff_feat,
                 map_feat,
                 np.array(legal_action, dtype=np.float32),
                 progress_feat,
