@@ -3,56 +3,31 @@
 
 class Config:
     # Feature layout
-    HERO_DIM = 10
-    MONSTER_DIM = 16   # 2 * 8
-    TARGET_DIM = 24    # 4 * 6
-    MAP_DIM = 25       # 5 * 5 local map patch
-    LEGAL_DIM = 8
-    PROGRESS_DIM = 4
-    LAST_ACTION_DIM = 8
-
-    FEATURES = [HERO_DIM, MONSTER_DIM, TARGET_DIM, MAP_DIM, LEGAL_DIM, PROGRESS_DIM, LAST_ACTION_DIM]
+    # hero_self: 8
+    # monsters: 2 x 6 = 12
+    # treasures: 4 x 6 = 24
+    # buffs: 2 x 6 = 12
+    # map_local: 25
+    # legal_action: 16
+    # progress: 4
+    # last_action_one_hot: 16
+    FEATURES = [8, 12, 24, 12, 25, 16, 4, 16]
     FEATURE_SPLIT_SHAPE = FEATURES
     FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)
     DIM_OF_OBSERVATION = FEATURE_LEN
 
-    ACTION_NUM = 8
+    ACTION_NUM = 16
     VALUE_NUM = 1
 
-    # PPO hyperparameters
     GAMMA = 0.99
     LAMDA = 0.95
     INIT_LEARNING_RATE_START = 3e-4
-    WEIGHT_DECAY = 0.0
-    BETA_START = 0.01
+    BETA_START = 0.005
     CLIP_PARAM = 0.2
     VF_COEF = 0.5
     GRAD_CLIP_RANGE = 0.5
-    PPO_EPOCHS = 4
-    MINI_BATCH_SIZE = 256
-    TARGET_KL = 0.03
 
-    # Model size
-    HIDDEN_DIM = 256
-    ACTOR_HIDDEN_DIM = 128
-    CRITIC_HIDDEN_DIM = 128
-
-    # Reward scales
-    SCORE_GAIN_SCALE = 1.0
-    SCORE_GAIN_CLIP = 5.0
-    TERMINATED_PENALTY = -3.0
-    TRUNCATED_BONUS = 2.0
-    SURVIVE_REWARD = 0.002
-    MONSTER_SHAPING_SCALE = 0.08
-    TARGET_PROGRESS_SCALE = 0.12
-    STAGNATION_PENALTY = 0.001
-
-    # Normalization constants
-    MAP_SIZE = 128.0
-    MAX_MONSTER_SPEED = 8.0
-    MAX_FLASH_CD = 2000.0
-    MAX_BUFF_DURATION = 100.0
-    MAX_STEP = 2000.0
-    MAX_SCORE = 200.0
-
-    EPS = 1e-8
+    PPO_EPOCH = 4
+    MINIBATCH_SIZE = 128
+    MAX_BATCH_SIZE = 4096
+    ADV_NORM_EPS = 1e-8

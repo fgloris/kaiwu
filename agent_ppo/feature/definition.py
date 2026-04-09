@@ -25,17 +25,8 @@ SampleData = create_cls(
 def sample_process(list_sample_data):
     for i in range(len(list_sample_data) - 1):
         list_sample_data[i].next_value = list_sample_data[i + 1].value
-    if list_sample_data:
-        list_sample_data[-1].next_value = list_sample_data[-1].next_value * 0.0
     _calc_gae(list_sample_data)
     return list_sample_data
-
-
-def _scalar(x):
-    try:
-        return float(x[0])
-    except Exception:
-        return float(x)
 
 
 def _calc_gae(list_sample_data):
@@ -43,12 +34,9 @@ def _calc_gae(list_sample_data):
     gamma = Config.GAMMA
     lamda = Config.LAMDA
     for sample in reversed(list_sample_data):
-        done = _scalar(sample.done)
+        done = float(sample.done[0]) if hasattr(sample.done, "__len__") else float(sample.done)
         not_done = 1.0 - done
-        reward = _scalar(sample.reward)
-        value = _scalar(sample.value)
-        next_value = _scalar(sample.next_value)
-        delta = reward + gamma * not_done * next_value - value
+        delta = sample.reward + gamma * not_done * sample.next_value - sample.value
         gae = delta + gamma * lamda * not_done * gae
-        sample.advantage = [gae]
-        sample.reward_sum = [gae + value]
+        sample.advantage = gae
+        sample.reward_sum = gae + sample.value

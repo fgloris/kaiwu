@@ -3,11 +3,7 @@
 
 import os
 import time
-
-import numpy as np
 import torch
-import torch.nn.functional as F
-
 from agent_ppo.conf.conf import Config
 
 
@@ -19,126 +15,133 @@ class Algorithm:
         self.parameters = [p for pg in self.optimizer.param_groups for p in pg["params"]]
         self.logger = logger
         self.monitor = monitor
+
         self.label_size = Config.ACTION_NUM
+        self.value_num = Config.VALUE_NUM
+        self.var_beta = Config.BETA_START
         self.vf_coef = Config.VF_COEF
         self.clip_param = Config.CLIP_PARAM
-        self.entropy_coef = Config.BETA_START
+        self.ppo_epoch = Config.PPO_EPOCH
+        self.minibatch_size = Config.MINIBATCH_SIZE
+
         self.last_report_monitor_time = 0
         self.train_step = 0
 
     def learn(self, list_sample_data):
-        obs = torch.stack([torch.as_tensor(f.obs, dtype=torch.float32) for f in list_sample_data]).to(self.device)
-        legal_action = torch.stack([torch.as_tensor(f.legal_action, dtype=torch.float32) for f in list_sample_data]).to(self.device)
-        act = torch.stack([torch.as_tensor(f.act, dtype=torch.float32) for f in list_sample_data]).to(self.device).view(-1, 1)
-        old_prob = torch.stack([torch.as_tensor(f.prob, dtype=torch.float32) for f in list_sample_data]).to(self.device)
-        reward = torch.stack([torch.as_tensor(f.reward, dtype=torch.float32) for f in list_sample_data]).to(self.device)
-        advantage = torch.stack([torch.as_tensor(f.advantage, dtype=torch.float32) for f in list_sample_data]).to(self.device).view(-1, 1)
-        old_value = torch.stack([torch.as_tensor(f.value, dtype=torch.float32) for f in list_sample_data]).to(self.device)
-        reward_sum = torch.stack([torch.as_tensor(f.reward_sum, dtype=torch.float32) for f in list_sample_data]).to(self.device)
+        if not list_sample_data:
+            return
 
-        advantage = (advantage - advantage.mean()) / (advantage.std(unbiased=False) + Config.EPS)
-        old_log_prob = self._action_log_prob(old_prob, act)
+        obs = torch.stack([f.obs for f in list_sample_data]).float().to(self.device)
+        legal_action = torch.stack([f.legal_action for f in list_sample_data]).float().to(self.device)
+        act = torch.stack([f.act for f in list_sample_data]).float().to(self.device).view(-1, 1)
+        old_prob = torch.stack([f.prob for f in list_sample_data]).float().to(self.device)
+        reward = torch.stack([f.reward for f in list_sample_data]).float().to(self.device)
+        advantage = torch.stack([f.advantage for f in list_sample_data]).float().to(self.device)
+        old_value = torch.stack([f.value for f in list_sample_data]).float().to(self.device)
+        reward_sum = torch.stack([f.reward_sum for f in list_sample_data]).float().to(self.device)
+
+        advantage = (advantage - advantage.mean()) / (advantage.std() + Config.ADV_NORM_EPS)
 
         batch_size = obs.shape[0]
-        mini_batch_size = min(Config.MINI_BATCH_SIZE, batch_size)
-        epoch_stats = []
+        minibatch_size = min(self.minibatch_size, batch_size)
+        last_total_loss = None
+        last_info = None
 
-        for epoch in range(Config.PPO_EPOCHS):
-            perm = torch.randperm(batch_size, device=self.device)
-            for start in range(0, batch_size, mini_batch_size):
-                idx = perm[start:start + mini_batch_size]
-                logits, value_pred = self.model(obs[idx])
-                total_loss, stats = self._compute_loss(
+        for _ in range(self.ppo_epoch):
+            indices = torch.randperm(batch_size, device=self.device)
+            for start in range(0, batch_size, minibatch_size):
+                end = min(start + minibatch_size, batch_size)
+                mb_idx = indices[start:end]
+
+                self.model.set_train_mode()
+                self.optimizer.zero_grad()
+
+                logits, value_pred = self.model(obs[mb_idx])
+                total_loss, info_list = self._compute_loss(
                     logits=logits,
                     value_pred=value_pred,
-                    legal_action=legal_action[idx],
-                    action=act[idx],
-                    old_log_prob=old_log_prob[idx],
-                    advantage=advantage[idx],
-                    old_value=old_value[idx],
-                    reward_sum=reward_sum[idx],
+                    legal_action=legal_action[mb_idx],
+                    old_action=act[mb_idx],
+                    old_prob=old_prob[mb_idx],
+                    advantage=advantage[mb_idx],
+                    old_value=old_value[mb_idx],
+                    reward_sum=reward_sum[mb_idx],
                 )
-                self.optimizer.zero_grad()
+
                 total_loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.parameters, Config.GRAD_CLIP_RANGE)
                 self.optimizer.step()
-                epoch_stats.append(stats)
+
+                last_total_loss = total_loss
+                last_info = info_list
                 self.train_step += 1
-                if stats["approx_kl"] > Config.TARGET_KL:
-                    break
-            if epoch_stats and epoch_stats[-1]["approx_kl"] > Config.TARGET_KL:
-                break
 
-        if not epoch_stats:
-            return
-
-        keys = list(epoch_stats[0].keys())
-        avg_stats = {k: float(np.mean([s[k] for s in epoch_stats])) for k in keys}
         now = time.time()
-        if now - self.last_report_monitor_time >= 60:
-            log_str = (
-                f"[train] total_loss:{avg_stats['total_loss']:.4f} policy_loss:{avg_stats['policy_loss']:.4f} "
-                f"value_loss:{avg_stats['value_loss']:.4f} entropy:{avg_stats['entropy']:.4f} "
-                f"approx_kl:{avg_stats['approx_kl']:.5f} clipfrac:{avg_stats['clipfrac']:.3f} "
-                f"adv_std:{avg_stats['adv_std']:.4f} max_prob:{avg_stats['max_prob']:.3f} reward:{reward.mean().item():.4f}"
+        if last_total_loss is not None and now - self.last_report_monitor_time >= 60:
+            with torch.no_grad():
+                approx_kl = last_info[3].item()
+                clip_frac = last_info[4].item()
+                entropy_val = last_info[2].item()
+                results = {
+                    "total_loss": round(last_total_loss.item(), 4),
+                    "value_loss": round(last_info[0].item(), 4),
+                    "policy_loss": round(last_info[1].item(), 4),
+                    "entropy_loss": round(entropy_val, 4),
+                    "reward": round(reward.mean().item(), 4),
+                    "approx_kl": round(approx_kl, 6),
+                    "clip_frac": round(clip_frac, 4),
+                }
+            self.logger.info(
+                f"[train] total_loss:{results['total_loss']} policy_loss:{results['policy_loss']} "
+                f"value_loss:{results['value_loss']} entropy:{results['entropy_loss']} "
+                f"kl:{results['approx_kl']} clip_frac:{results['clip_frac']}"
             )
-            self.logger.info(log_str)
             if self.monitor:
-                self.monitor.put_data(
-                    {
-                        os.getpid(): {
-                            "total_loss": round(avg_stats["total_loss"], 4),
-                            "value_loss": round(avg_stats["value_loss"], 4),
-                            "policy_loss": round(avg_stats["policy_loss"], 4),
-                            "entropy_loss": round(avg_stats["entropy"], 4),
-                            "approx_kl": round(avg_stats["approx_kl"], 5),
-                            "clipfrac": round(avg_stats["clipfrac"], 4),
-                            "max_prob": round(avg_stats["max_prob"], 4),
-                            "reward": round(reward.mean().item(), 4),
-                        }
-                    }
-                )
+                self.monitor.put_data({os.getpid(): results})
             self.last_report_monitor_time = now
 
-    def _compute_loss(self, logits, value_pred, legal_action, action, old_log_prob, advantage, old_value, reward_sum):
+    def _compute_loss(
+        self,
+        logits,
+        value_pred,
+        legal_action,
+        old_action,
+        old_prob,
+        advantage,
+        old_value,
+        reward_sum,
+    ):
         prob_dist = self._masked_softmax(logits, legal_action)
-        new_log_prob = self._action_log_prob(prob_dist, action)
-        log_ratio = new_log_prob - old_log_prob
-        ratio = torch.exp(log_ratio)
+        one_hot = torch.nn.functional.one_hot(old_action[:, 0].long(), self.label_size).float()
+        new_prob = (one_hot * prob_dist).sum(1, keepdim=True).clamp_min(1e-8)
+        old_action_prob = (one_hot * old_prob).sum(1, keepdim=True).clamp_min(1e-8)
+        ratio = new_prob / old_action_prob
+        adv = advantage.view(-1, 1)
 
-        surr1 = ratio * advantage
-        surr2 = ratio.clamp(1.0 - self.clip_param, 1.0 + self.clip_param) * advantage
+        surr1 = ratio * adv
+        surr2 = ratio.clamp(1 - self.clip_param, 1 + self.clip_param) * adv
         policy_loss = -torch.min(surr1, surr2).mean()
 
-        value_pred_clipped = old_value + (value_pred - old_value).clamp(-self.clip_param, self.clip_param)
-        value_loss_unclipped = (value_pred - reward_sum).pow(2)
-        value_loss_clipped = (value_pred_clipped - reward_sum).pow(2)
-        value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
+        vp = value_pred
+        ov = old_value
+        tdret = reward_sum
+        value_clip = ov + (vp - ov).clamp(-self.clip_param, self.clip_param)
+        value_loss = 0.5 * torch.maximum(torch.square(tdret - vp), torch.square(tdret - value_clip)).mean()
 
-        entropy = -(prob_dist * torch.log(prob_dist.clamp_min(Config.EPS))).sum(dim=1).mean()
-        total_loss = policy_loss + self.vf_coef * value_loss - self.entropy_coef * entropy
+        entropy_loss = (-prob_dist * torch.log(prob_dist.clamp_min(1e-8))).sum(1).mean()
+        total_loss = self.vf_coef * value_loss + policy_loss - self.var_beta * entropy_loss
 
-        clipfrac = ((ratio - 1.0).abs() > self.clip_param).float().mean().item()
-        approx_kl = (old_log_prob - new_log_prob).mean().abs().item()
-        max_prob = prob_dist.max(dim=1).values.mean().item()
+        with torch.no_grad():
+            log_ratio = torch.log(new_prob) - torch.log(old_action_prob)
+            approx_kl = ((ratio - 1.0) - log_ratio).mean()
+            clip_frac = ((ratio - 1.0).abs() > self.clip_param).float().mean()
 
-        stats = {
-            "total_loss": total_loss.item(),
-            "policy_loss": policy_loss.item(),
-            "value_loss": value_loss.item(),
-            "entropy": entropy.item(),
-            "approx_kl": approx_kl,
-            "clipfrac": clipfrac,
-            "adv_std": advantage.std(unbiased=False).item(),
-            "max_prob": max_prob,
-        }
-        return total_loss, stats
+        return total_loss, [value_loss, policy_loss, entropy_loss, approx_kl, clip_frac]
 
     def _masked_softmax(self, logits, legal_action):
-        masked_logits = logits.masked_fill(legal_action < 0.5, -1e9)
-        return F.softmax(masked_logits, dim=1)
-
-    def _action_log_prob(self, prob_dist, action):
-        one_hot = F.one_hot(action[:, 0].long(), self.label_size).float()
-        chosen_prob = (one_hot * prob_dist).sum(dim=1, keepdim=True).clamp_min(Config.EPS)
-        return chosen_prob.log()
+        mask = legal_action.float()
+        valid_count = mask.sum(dim=1, keepdim=True)
+        fallback_mask = torch.ones_like(mask)
+        mask = torch.where(valid_count > 0, mask, fallback_mask)
+        masked_logits = logits.masked_fill(mask < 0.5, -1e9)
+        return torch.nn.functional.softmax(masked_logits, dim=1)

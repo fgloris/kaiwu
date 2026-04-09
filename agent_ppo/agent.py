@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 
-import numpy as np
 import torch
 
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
+
+import numpy as np
 from kaiwudrl.interface.agent import BaseAgent
 
 from agent_ppo.algorithm.algorithm import Algorithm
@@ -13,14 +16,9 @@ from agent_ppo.feature.preprocessor import Preprocessor
 from agent_ppo.model.model import Model
 
 
-torch.set_num_threads(1)
-torch.set_num_interop_threads(1)
-
-
 class Agent(BaseAgent):
     def __init__(self, agent_type="player", device=None, logger=None, monitor=None):
         torch.manual_seed(0)
-        np.random.seed(0)
         self.device = device
         self.model = Model(device).to(self.device)
         self.optimizer = torch.optim.Adam(
@@ -28,7 +26,6 @@ class Agent(BaseAgent):
             lr=Config.INIT_LEARNING_RATE_START,
             betas=(0.9, 0.999),
             eps=1e-8,
-            weight_decay=Config.WEIGHT_DECAY,
         )
         self.algorithm = Algorithm(self.model, self.optimizer, self.device, logger, monitor)
         self.preprocessor = Preprocessor()
@@ -82,17 +79,27 @@ class Agent(BaseAgent):
     def _run_model(self, feature, legal_action):
         self.model.set_eval_mode()
         obs_tensor = torch.tensor(np.array([feature]), dtype=torch.float32).to(self.device)
-        legal_action_tensor = torch.tensor(np.array([legal_action]), dtype=torch.float32).to(self.device)
         with torch.no_grad():
             logits, value = self.model(obs_tensor, inference=True)
-            masked_logits = logits.masked_fill(legal_action_tensor < 0.5, -1e9)
-            prob = torch.softmax(masked_logits, dim=1)
         logits_np = logits.cpu().numpy()[0]
         value_np = value.cpu().numpy()[0]
-        prob_np = prob.cpu().numpy()[0]
-        return logits_np, value_np, prob_np
+        legal_action_np = np.array(legal_action, dtype=np.float32)
+        prob = self._legal_soft_max(logits_np, legal_action_np)
+        return logits_np, value_np, prob
+
+    def _legal_soft_max(self, input_hidden, legal_action):
+        legal_action = np.asarray(legal_action, dtype=np.float32)
+        if legal_action.sum() <= 0:
+            legal_action = np.ones_like(legal_action, dtype=np.float32)
+        masked = np.where(legal_action > 0.5, input_hidden, -1e9)
+        masked = masked - np.max(masked, keepdims=True)
+        exp_logits = np.exp(np.clip(masked, -50.0, 50.0)) * legal_action
+        denom = np.sum(exp_logits, keepdims=True)
+        if float(denom) <= 0:
+            return legal_action / np.sum(legal_action)
+        return exp_logits / denom
 
     def _legal_sample(self, probs, use_max=False):
         if use_max:
             return int(np.argmax(probs))
-        return int(np.random.choice(np.arange(Config.ACTION_NUM), p=probs))
+        return int(np.argmax(np.random.multinomial(1, probs, size=1)))

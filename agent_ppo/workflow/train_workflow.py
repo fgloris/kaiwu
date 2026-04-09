@@ -3,12 +3,9 @@
 
 import os
 import time
-
 import numpy as np
-from agent_ppo.conf.conf import Config
 from agent_ppo.feature.definition import SampleData, sample_process
-from tools.metrics_utils import get_training_metrics
-from tools.train_env_conf_validate import read_usr_conf
+from common_python.utils.common_func import get_training_metrics, read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
 
 
@@ -30,7 +27,7 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
             g_data.clear()
 
             now = time.time()
-            if now - last_save_model_time >= 60:
+            if now - last_save_model_time >= 1800:
                 agent.save_model()
                 last_save_model_time = now
 
@@ -68,44 +65,44 @@ class EpisodeRunner:
             done = False
             step = 0
             total_reward = 0.0
-            non_zero_reward_steps = 0
-            total_score = 0.0
-
             self.logger.info(f"Episode {self.episode_cnt} start")
 
             while not done:
                 act_data = self.agent.predict(list_obs_data=[obs_data])[0]
                 act = self.agent.action_process(act_data)
-                _, env_obs = self.env.step(act)
+                env_reward, env_obs = self.env.step(act)
 
                 if handle_disaster_recovery(env_obs, self.logger):
                     break
 
-                terminated = env_obs["terminated"]
-                truncated = env_obs["truncated"]
-                step += 1
+                terminated = bool(env_obs["terminated"])
+                truncated = bool(env_obs["truncated"])
                 done = terminated or truncated
+                step += 1
 
-                next_obs_data, remain_info = self.agent.observation_process(env_obs)
-                reward = np.array(remain_info.get("reward", [0.0]), dtype=np.float32)
+                next_obs_data, next_remain_info = self.agent.observation_process(env_obs)
+                reward = np.array(next_remain_info.get("reward", [0.0]), dtype=np.float32)
                 total_reward += float(reward[0])
-                if abs(float(reward[0])) > 1e-8:
-                    non_zero_reward_steps += 1
 
                 final_reward = np.zeros(1, dtype=np.float32)
+                env_info = env_obs["observation"].get("env_info", {})
+                total_score = float(env_info.get("total_score", 0.0))
+                treasures_collected = int(env_info.get("treasures_collected", 0))
+                collected_buff = int(env_info.get("collected_buff", 0))
+                flash_count = int(env_info.get("flash_count", 0))
+
                 if done:
-                    env_info = env_obs["observation"].get("env_info", {})
-                    total_score = float(env_info.get("total_score", 0.0))
                     if terminated:
-                        final_reward[0] = Config.TERMINATED_PENALTY
+                        final_reward[0] = -1.0
                         result_str = "FAIL"
                     else:
-                        final_reward[0] = Config.TRUNCATED_BONUS + 0.02 * total_score
+                        final_reward[0] = 1.0
                         result_str = "WIN"
+
                     self.logger.info(
                         f"[GAMEOVER] episode:{self.episode_cnt} steps:{step} result:{result_str} "
-                        f"sim_score:{total_score:.1f} total_reward:{total_reward:.3f} "
-                        f"non_zero_reward_steps:{non_zero_reward_steps}"
+                        f"score:{total_score:.1f} treasure:{treasures_collected} buff:{collected_buff} "
+                        f"flash:{flash_count} total_reward:{total_reward + float(final_reward[0]):.3f}"
                     )
 
                 frame = SampleData(
@@ -132,8 +129,10 @@ class EpisodeRunner:
                             "reward": round(total_reward + float(final_reward[0]), 4),
                             "episode_steps": step,
                             "episode_cnt": self.episode_cnt,
-                            "score": round(total_score, 4),
-                            "non_zero_reward_steps": non_zero_reward_steps,
+                            "episode_score": round(total_score, 2),
+                            "treasures_collected": treasures_collected,
+                            "buff_collected": collected_buff,
+                            "flash_count": flash_count,
                         }
                         self.monitor.put_data({os.getpid(): monitor_data})
                         self.last_report_monitor_time = now

@@ -3,69 +3,49 @@
 
 import torch
 import torch.nn as nn
-
 from agent_ppo.conf.conf import Config
 
 
-class ResidualMLPBlock(nn.Module):
-    def __init__(self, dim: int):
-        super().__init__()
-        self.fc1 = nn.Linear(dim, dim)
-        self.fc2 = nn.Linear(dim, dim)
-        self.norm = nn.LayerNorm(dim)
-        self.act = nn.Tanh()
-        self._init_weights()
-
-    def _init_weights(self):
-        nn.init.orthogonal_(self.fc1.weight, gain=1.0)
-        nn.init.zeros_(self.fc1.bias)
-        nn.init.orthogonal_(self.fc2.weight, gain=1.0)
-        nn.init.zeros_(self.fc2.bias)
-
-    def forward(self, x):
-        out = self.act(self.fc1(x))
-        out = self.fc2(out)
-        return self.norm(x + out)
+def make_fc_layer(in_features, out_features, gain=1.0):
+    fc = nn.Linear(in_features, out_features)
+    nn.init.orthogonal_(fc.weight.data, gain=gain)
+    nn.init.zeros_(fc.bias.data)
+    return fc
 
 
 class Model(nn.Module):
     def __init__(self, device=None):
         super().__init__()
-        self.model_name = "gorge_chase_ppo"
+        self.model_name = "gorge_chase_ppo_v3"
         self.device = device
+
         input_dim = Config.DIM_OF_OBSERVATION
-        hidden_dim = Config.HIDDEN_DIM
+        action_num = Config.ACTION_NUM
+        value_num = Config.VALUE_NUM
 
-        self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+        self.backbone = nn.Sequential(
+            make_fc_layer(input_dim, 256, gain=1.0),
             nn.Tanh(),
-            nn.LayerNorm(hidden_dim),
-            ResidualMLPBlock(hidden_dim),
-            ResidualMLPBlock(hidden_dim),
-        )
-        self.actor = nn.Sequential(
-            nn.Linear(hidden_dim, Config.ACTOR_HIDDEN_DIM),
+            make_fc_layer(256, 256, gain=1.0),
             nn.Tanh(),
-            nn.Linear(Config.ACTOR_HIDDEN_DIM, Config.ACTION_NUM),
-        )
-        self.critic = nn.Sequential(
-            nn.Linear(hidden_dim, Config.CRITIC_HIDDEN_DIM),
+            make_fc_layer(256, 128, gain=1.0),
             nn.Tanh(),
-            nn.Linear(Config.CRITIC_HIDDEN_DIM, Config.VALUE_NUM),
         )
-        self._init_weights()
-
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                gain = 0.01 if m is self.actor[-1] else 1.0
-                nn.init.orthogonal_(m.weight, gain=gain)
-                nn.init.zeros_(m.bias)
+        self.actor_head = nn.Sequential(
+            make_fc_layer(128, 64, gain=1.0),
+            nn.Tanh(),
+            make_fc_layer(64, action_num, gain=0.01),
+        )
+        self.critic_head = nn.Sequential(
+            make_fc_layer(128, 64, gain=1.0),
+            nn.Tanh(),
+            make_fc_layer(64, value_num, gain=1.0),
+        )
 
     def forward(self, obs, inference=False):
-        hidden = self.encoder(obs)
-        logits = self.actor(hidden)
-        value = self.critic(hidden)
+        hidden = self.backbone(obs)
+        logits = self.actor_head(hidden)
+        value = self.critic_head(hidden)
         return logits, value
 
     def set_train_mode(self):
