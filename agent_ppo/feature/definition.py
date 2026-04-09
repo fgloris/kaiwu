@@ -1,27 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
-###########################################################################
-# Copyright © 1998 - 2026 Tencent. All Rights Reserved.
-###########################################################################
-"""
-Author: Tencent AI Arena Authors
 
-Data definitions, GAE computation for Gorge Chase PPO.
-峡谷追猎 PPO 数据类定义与 GAE 计算。
-"""
+from common_python.utils.common_func import create_cls
+from agent_ppo_strong.conf.conf import Config
 
-import numpy as np
-from common_python.utils.common_func import create_cls, attached
-from agent_ppo.conf.conf import Config
-
-
-# ObsData: feature=40D vector, legal_action=8D mask / 特征向量与合法动作掩码
 ObsData = create_cls("ObsData", feature=None, legal_action=None)
-
-# ActData: action, d_action(greedy), prob, value / 动作、贪心动作、概率、价值
 ActData = create_cls("ActData", action=None, d_action=None, prob=None, value=None)
 
-# SampleData: single-frame sample with int dims / 单帧样本（整数表示维度）
 SampleData = create_cls(
     "SampleData",
     obs=Config.DIM_OF_OBSERVATION,
@@ -38,15 +23,19 @@ SampleData = create_cls(
 
 
 def sample_process(list_sample_data):
-    """Fill next_value and compute GAE advantage.
-
-    填充 next_value 并使用 GAE 计算优势函数。
-    """
     for i in range(len(list_sample_data) - 1):
         list_sample_data[i].next_value = list_sample_data[i + 1].value
-
+    if list_sample_data:
+        list_sample_data[-1].next_value = list_sample_data[-1].next_value * 0.0
     _calc_gae(list_sample_data)
     return list_sample_data
+
+
+def _scalar(x):
+    try:
+        return float(x[0])
+    except Exception:
+        return float(x)
 
 
 def _calc_gae(list_sample_data):
@@ -54,11 +43,12 @@ def _calc_gae(list_sample_data):
     gamma = Config.GAMMA
     lamda = Config.LAMDA
     for sample in reversed(list_sample_data):
-        done = float(sample.done[0]) if hasattr(sample.done, "__len__") else float(sample.done)
+        done = _scalar(sample.done)
         not_done = 1.0 - done
-
-        delta = sample.reward + gamma * not_done * sample.next_value - sample.value
+        reward = _scalar(sample.reward)
+        value = _scalar(sample.value)
+        next_value = _scalar(sample.next_value)
+        delta = reward + gamma * not_done * next_value - value
         gae = delta + gamma * lamda * not_done * gae
-
-        sample.advantage = gae
-        sample.reward_sum = gae + sample.value
+        sample.advantage = [gae]
+        sample.reward_sum = [gae + value]

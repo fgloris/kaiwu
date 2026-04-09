@@ -1,66 +1,71 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
-###########################################################################
-# Copyright © 1998 - 2026 Tencent. All Rights Reserved.
-###########################################################################
-"""
-Author: Tencent AI Arena Authors
-
-Neural network model for Gorge Chase PPO.
-峡谷追猎 PPO 神经网络模型。
-"""
 
 import torch
 import torch.nn as nn
-import numpy as np
 
-from agent_ppo.conf.conf import Config
+from agent_ppo_strong.conf.conf import Config
 
 
-def make_fc_layer(in_features, out_features):
-    """Create a linear layer with orthogonal initialization.
+class ResidualMLPBlock(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, dim)
+        self.fc2 = nn.Linear(dim, dim)
+        self.norm = nn.LayerNorm(dim)
+        self.act = nn.Tanh()
+        self._init_weights()
 
-    创建正交初始化的线性层。
-    """
-    fc = nn.Linear(in_features, out_features)
-    nn.init.orthogonal_(fc.weight.data)
-    nn.init.zeros_(fc.bias.data)
-    return fc
+    def _init_weights(self):
+        nn.init.orthogonal_(self.fc1.weight, gain=1.0)
+        nn.init.zeros_(self.fc1.bias)
+        nn.init.orthogonal_(self.fc2.weight, gain=1.0)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, x):
+        out = self.act(self.fc1(x))
+        out = self.fc2(out)
+        return self.norm(x + out)
 
 
 class Model(nn.Module):
     def __init__(self, device=None):
         super().__init__()
-        self.model_name = "gorge_chase_lite_v2"
+        self.model_name = "gorge_chase_ppo_strong"
         self.device = device
-
         input_dim = Config.DIM_OF_OBSERVATION
-        action_num = Config.ACTION_NUM
-        value_num = Config.VALUE_NUM
+        hidden_dim = Config.HIDDEN_DIM
 
-        self.backbone = nn.Sequential(
-            make_fc_layer(input_dim, 128),
-            nn.ReLU(),
-            make_fc_layer(128, 128),
-            nn.ReLU(),
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.Tanh(),
+            nn.LayerNorm(hidden_dim),
+            ResidualMLPBlock(hidden_dim),
+            ResidualMLPBlock(hidden_dim),
         )
+        self.actor = nn.Sequential(
+            nn.Linear(hidden_dim, Config.ACTOR_HIDDEN_DIM),
+            nn.Tanh(),
+            nn.Linear(Config.ACTOR_HIDDEN_DIM, Config.ACTION_NUM),
+        )
+        self.critic = nn.Sequential(
+            nn.Linear(hidden_dim, Config.CRITIC_HIDDEN_DIM),
+            nn.Tanh(),
+            nn.Linear(Config.CRITIC_HIDDEN_DIM, Config.VALUE_NUM),
+        )
+        self._init_weights()
 
-        self.actor_head = nn.Sequential(
-            make_fc_layer(128, 64),
-            nn.ReLU(),
-            make_fc_layer(64, action_num),
-        )
-
-        self.critic_head = nn.Sequential(
-            make_fc_layer(128, 64),
-            nn.ReLU(),
-            make_fc_layer(64, value_num),
-        )
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                gain = 0.01 if m is self.actor[-1] else 1.0
+                nn.init.orthogonal_(m.weight, gain=gain)
+                nn.init.zeros_(m.bias)
 
     def forward(self, obs, inference=False):
-        hidden = self.backbone(obs)
-        logits = self.actor_head(hidden)
-        value = self.critic_head(hidden)
+        hidden = self.encoder(obs)
+        logits = self.actor(hidden)
+        value = self.critic(hidden)
         return logits, value
 
     def set_train_mode(self):
