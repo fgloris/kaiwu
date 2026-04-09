@@ -42,6 +42,8 @@ class Preprocessor:
         self.max_step = 200
         self.last_min_monster_dist_norm = 0.5
         self.last_total_score = 0.0
+        self.last_treasure_collected = 0
+        self.last_collected_buff = 0
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -132,7 +134,7 @@ class Preprocessor:
         if nearest_buff is not None:
             buff_feat = np.array(
                 [
-                    _norm(nearest_treasure.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
+                    _norm(nearest_buff.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
                     _norm(nearest_buff.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
                 ],
                 dtype=np.float32,
@@ -163,6 +165,11 @@ class Preprocessor:
             legal_action = [1] * 8
 
         # Progress features (2D) / 进度特征
+        cur_min_dist_norm = 1.0
+        for m_feat in monster_feats:
+            if m_feat[0] > 0:
+                cur_min_dist_norm = min(cur_min_dist_norm, m_feat[4])
+
         step_norm = _norm(self.step_no, self.max_step)
         survival_ratio = step_norm * (0.5 + 0.5 * cur_min_dist_norm)
         progress_feat = np.array([step_norm, survival_ratio], dtype=np.float32)
@@ -182,11 +189,6 @@ class Preprocessor:
         )
 
         # Step reward / 即时奖励
-        cur_min_dist_norm = 1.0
-        for m_feat in monster_feats:
-            if m_feat[0] > 0:
-                cur_min_dist_norm = min(cur_min_dist_norm, m_feat[4])
-
         survive_reward = 0.01
         dist_shaping = 0.1 * (cur_min_dist_norm - self.last_min_monster_dist_norm)
 
@@ -198,10 +200,24 @@ class Preprocessor:
         score_gain = cur_total_score - self.last_total_score
         self.last_total_score = cur_total_score
 
-        score_reward = np.clip(score_gain, -1.0, 1.0)
+        # 3) 宝箱收集奖励
+        cur_treasure_collected = int(hero.get("treasure_collected_count", 0))
+        treasure_gain = cur_treasure_collected - self.last_treasure_collected
+        self.last_treasure_collected = cur_treasure_collected
+
+        treasure_reward = 0.5 * max(0, treasure_gain)
+
+        # 4) buff收集奖励
+        cur_collected_buff = int(env_info.get("collected_buff", 0))
+        buff_gain = cur_collected_buff - self.last_collected_buff
+        self.last_collected_buff = cur_collected_buff
+
+        buff_reward = 0.3 * max(0, buff_gain)
+
+        score_reward = score_gain
 
         # final step reward scalar
-        reward_scalar = 1.0 * score_reward + 0.01 * survive_reward + 0.05 * dist_shaping
+        reward_scalar = 1.0 * score_reward + survive_reward + 0.1 * dist_shaping + 0.5 * treasure_reward + 0.3 * buff_reward
         reward = [reward_scalar]
 
         return feature, legal_action, reward
