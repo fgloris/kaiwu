@@ -122,6 +122,7 @@ class Algorithm:
         old_action_prob = (one_hot * old_prob).sum(1, keepdim=True).clamp(1e-9)
         ratio = new_prob / old_action_prob
         adv = advantage.view(-1, 1)
+        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         policy_loss1 = -ratio * adv
         policy_loss2 = -ratio.clamp(1 - self.clip_param, 1 + self.clip_param) * adv
         policy_loss = torch.maximum(policy_loss1, policy_loss2).mean()

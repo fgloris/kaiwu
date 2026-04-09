@@ -128,10 +128,10 @@ class EpisodeRunner:
                     total_score = env_info.get("total_score", 0)
 
                     if terminated:
-                        final_reward[0] = -10.0
+                        final_reward[0] = -2.0
                         result_str = "FAIL"
                     else:
-                        final_reward[0] = 10.0 # 0.01 * total_score
+                        final_reward[0] = 2.0 # 0.01 * total_score
                         result_str = "WIN"
 
                     self.logger.info(

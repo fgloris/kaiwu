@@ -50,15 +50,15 @@ def sample_process(list_sample_data):
 
 
 def _calc_gae(list_sample_data):
-    """Compute GAE (Generalized Advantage Estimation).
-
-    计算广义优势估计（GAE）。
-    """
     gae = 0.0
     gamma = Config.GAMMA
     lamda = Config.LAMDA
     for sample in reversed(list_sample_data):
-        delta = -sample.value + sample.reward + gamma * sample.next_value
-        gae = gae * gamma * lamda + delta
+        done = float(sample.done[0]) if hasattr(sample.done, "__len__") else float(sample.done)
+        not_done = 1.0 - done
+
+        delta = sample.reward + gamma * not_done * sample.next_value - sample.value
+        gae = delta + gamma * lamda * not_done * gae
+
         sample.advantage = gae
         sample.reward_sum = gae + sample.value

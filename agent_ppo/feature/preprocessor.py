@@ -141,7 +141,6 @@ class Preprocessor:
             if m_feat[0] > 0:
                 cur_min_dist_norm = min(cur_min_dist_norm, m_feat[4])
 
-        survive_reward = 0.01
         dist_shaping = 0.1 * (cur_min_dist_norm - self.last_min_monster_dist_norm)
 
         self.last_min_monster_dist_norm = cur_min_dist_norm
@@ -152,10 +151,10 @@ class Preprocessor:
         score_gain = cur_total_score - self.last_total_score
         self.last_total_score = cur_total_score
 
-        score_reward = np.clip(score_gain, -1.0, 1.0)
+        score_reward = score_gain
 
         # final step reward scalar
-        reward_scalar = 1.0 * score_reward + 0.01 * survive_reward + 0.05 * dist_shaping
+        reward_scalar = 1.0 * score_reward + 0.1 * dist_shaping
         reward = [reward_scalar]
 
         return feature, legal_action, reward
