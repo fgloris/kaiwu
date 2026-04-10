@@ -56,9 +56,10 @@ class Agent(BaseAgent):
 
         将原始观测转换为 ObsData 和 remain_info。
         """
-        feature, legal_action, reward = self.preprocessor.feature_process(env_obs, self.last_action)
+        vector_feature, map_feature, legal_action, reward = self.preprocessor.feature_process(env_obs, self.last_action)
         obs_data = ObsData(
-            feature=list(feature),
+            vector_feature=list(vector_feature),
+            map_feature=list(map_feature.reshape(-1)),
             legal_action=legal_action,
         )
         remain_info = {"reward": reward}
@@ -69,10 +70,11 @@ class Agent(BaseAgent):
 
         训练时随机采样动作（探索）。
         """
-        feature = list_obs_data[0].feature
+        vector_feature = list_obs_data[0].vector_feature
+        map_feature = list_obs_data[0].map_feature
         legal_action = list_obs_data[0].legal_action
 
-        logits, value, prob = self._run_model(feature, legal_action)
+        logits, value, prob = self._run_model(vector_feature, map_feature, legal_action)
 
         action = self._legal_sample(prob, use_max=False)
         d_action = self._legal_sample(prob, use_max=True)
@@ -130,16 +132,19 @@ class Agent(BaseAgent):
         self.last_action = int(action[0])
         return int(action[0])
 
-    def _run_model(self, feature, legal_action):
+    def _run_model(self, vector_feature, map_feature, legal_action):
         """Run model inference, return logits, value, prob.
 
         执行模型推理，返回 logits、value 和动作概率。
         """
         self.model.set_eval_mode()
-        obs_tensor = torch.tensor(np.array([feature]), dtype=torch.float32).to(self.device)
+
+        vector_tensor = torch.tensor(np.array([vector_feature]), dtype=torch.float32).to(self.device)
+        map_tensor = torch.tensor(np.array([map_feature]), dtype=torch.float32).to(self.device)
+        map_tensor = map_tensor.view(-1, 1, 21, 21)
 
         with torch.no_grad():
-            logits, value = self.model(obs_tensor, inference=True)
+            logits, value = self.model(vector_tensor, map_tensor, inference=True)
 
         logits_np = logits.cpu().numpy()[0]
         value_np = value.cpu().numpy()[0]

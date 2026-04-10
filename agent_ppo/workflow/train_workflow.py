@@ -142,7 +142,8 @@ class EpisodeRunner:
 
                 # Build sample frame / 构造样本帧
                 frame = SampleData(
-                    obs=np.array(obs_data.feature, dtype=np.float32),
+                    vector_obs = np.array(obs_data.vector_feature, dtype=np.float32),
+                    map_obs = np.array(obs_data.map_feature, dtype=np.float32),
                     legal_action=np.array(obs_data.legal_action, dtype=np.float32),
                     act=np.array([act_data.action[0]], dtype=np.float32),
                     reward=reward,

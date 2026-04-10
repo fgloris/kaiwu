@@ -152,15 +152,13 @@ class Preprocessor:
             )
 
         # 局部地图特征 (16D)
-        map_feat = np.zeros(16, dtype=np.float32)
-        if map_info is not None and len(map_info) >= 13:
-            center = len(map_info) // 2
-            flat_idx = 0
-            for row in range(center - 2, center + 2):
-                for col in range(center - 2, center + 2):
-                    if 0 <= row < len(map_info) and 0 <= col < len(map_info[0]):
-                        map_feat[flat_idx] = float(map_info[row][col] != 0)
-                    flat_idx += 1
+        map_feat = np.zeros((21, 21), dtype=np.float32)
+        if map_info is not None:
+            h = min(21, len(map_info))
+            w = min(21, len(map_info[0]))
+            for i in range(h):
+                for j in range(w):
+                    map_feat[i, j] = float(map_info[i][j] != 0)
 
         # 合法动作掩码 (8D)
         legal_action = [1] * 16
@@ -181,14 +179,13 @@ class Preprocessor:
         progress_feat = np.array([step_norm, progress_treasure_collect], dtype=np.float32)
 
         # Concatenate features / 拼接特征
-        feature = np.concatenate(
+        vector_feature = np.concatenate(
             [
                 hero_feat,
                 monster_feats[0],
                 monster_feats[1],
                 treasure_feat,
                 buff_feat,
-                map_feat,
                 np.array(legal_action, dtype=np.float32),
                 progress_feat,
             ]
@@ -276,4 +273,4 @@ class Preprocessor:
         )
         reward = [reward_scalar]
 
-        return feature, legal_action, reward
+        return vector_feature, map_feat, legal_action, reward

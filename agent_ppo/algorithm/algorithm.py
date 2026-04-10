@@ -47,7 +47,9 @@ class Algorithm:
 
         训练入口：对一批 SampleData 执行 PPO 更新。
         """
-        obs = torch.stack([f.obs for f in list_sample_data]).to(self.device)
+        vector_obs = torch.stack([f.vector_obs for f in list_sample_data]).to(self.device)
+        map_obs = torch.stack([f.map_obs for f in list_sample_data]).to(self.device)
+        map_obs = map_obs.view(-1, 1, 21, 21)
         legal_action = torch.stack([f.legal_action for f in list_sample_data]).to(self.device)
         act = torch.stack([f.act for f in list_sample_data]).to(self.device).view(-1, 1)
         old_prob = torch.stack([f.prob for f in list_sample_data]).to(self.device)
@@ -59,7 +61,7 @@ class Algorithm:
         self.model.set_train_mode()
         self.optimizer.zero_grad()
 
-        logits, value_pred = self.model(obs)
+        logits, value_pred = self.model(vector_obs, map_obs)
 
         total_loss, info_list = self._compute_loss(
             logits=logits,
