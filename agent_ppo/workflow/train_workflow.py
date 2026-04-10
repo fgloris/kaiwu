@@ -222,10 +222,12 @@ class EpisodeRunner:
 
         result = {
             "steps": step,
-            "total_score": env_info.get("total_score", 0.0),
-            "treasures_collected": env_info.get("treasures_collected", 0),
-            "collected_buff": env_info.get("collected_buff", 0),
-            "flash_count": env_info.get("flash_count", 0),
+            "total_score": float(env_info.get("total_score", 0.0)),
+            "treasure_score": float(env_info.get("treasure_score", 0.0)),
+            "step_score": float(env_info.get("step_score", 0.0)),
+            "treasures_collected": int(env_info.get("treasures_collected", 0)),
+            "collected_buff": int(env_info.get("collected_buff", 0)),
+            "flash_count": int(env_info.get("flash_count", 0)),
             "terminated": bool(env_obs["terminated"]),
             "truncated": bool(env_obs["truncated"]),
         }
@@ -243,7 +245,10 @@ class EpisodeRunner:
             self.logger.info("[VAL] no valid results")
             return
 
-        avg_score = np.mean([x["total_score"] for x in results])
+        avg_total_score = np.mean([x["total_score"] for x in results])
+        avg_treasure_score = np.mean([x["treasure_score"] for x in results])
+        avg_step_score = np.mean([x["step_score"] for x in results])
+
         avg_steps = np.mean([x["steps"] for x in results])
         avg_treasures = np.mean([x["treasures_collected"] for x in results])
         avg_buffs = np.mean([x["collected_buff"] for x in results])
@@ -252,7 +257,9 @@ class EpisodeRunner:
 
         self.logger.info(
             f"[VAL] episodes:{len(results)} "
-            f"avg_score:{avg_score:.2f} "
+            f"avg_total_score:{avg_total_score:.2f} "
+            f"avg_treasure_score:{avg_treasure_score:.2f} "
+            f"avg_step_score:{avg_step_score:.2f} "
             f"avg_steps:{avg_steps:.2f} "
             f"avg_treasures:{avg_treasures:.2f} "
             f"avg_buffs:{avg_buffs:.2f} "
@@ -261,13 +268,9 @@ class EpisodeRunner:
         )
 
         if self.monitor:
-            self.monitor.put_data({
-                os.getpid(): {
-                    "val_score": round(float(avg_score), 4),
-                    "val_steps": round(float(avg_steps), 4),
-                    "val_treasures": round(float(avg_treasures), 4),
-                    "val_buffs": round(float(avg_buffs), 4),
-                    "val_flash": round(float(avg_flash), 4),
-                    "val_terminated_rate": round(float(term_rate), 4),
-                }
-            })
+            monitor_data = {
+                "eval_total_score": round(float(avg_total_score), 4),
+                "eval_treasure_score": round(float(avg_treasure_score), 4),
+                "eval_step_score": round(float(avg_step_score), 4),
+            }
+            self.monitor.put_data({os.getpid(): monitor_data})
