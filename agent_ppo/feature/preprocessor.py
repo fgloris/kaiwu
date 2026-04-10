@@ -106,11 +106,11 @@ class Preprocessor:
         # Organ features
         organs = frame_state.get("organs", [])
 
-        treasure_feat = np.array([1.0, 0.0], dtype=np.float32)
-        buff_feat = np.array([1.0, 0.0], dtype=np.float32)
+        treasure_feat = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
+        buff_feat = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
 
-        treasure_feat = np.zeros(4, dtype=np.float32)  # 前2个宝箱：每个2维
-        buff_feat = np.zeros(4, dtype=np.float32)      # 前2个buff：每个2维
+        treasure_feat = np.zeros(8, dtype=np.float32)  # 前2个宝箱：每个4维
+        buff_feat = np.zeros(8, dtype=np.float32)      # 前2个buff：每个4维
 
         treasures = []
         buffs = []
@@ -140,6 +140,7 @@ class Preprocessor:
             )
 
         for i, organ in enumerate(buffs[:2]):
+            organ_pos = organ["pos"]
             buff_feat[i * 4 : i * 4 + 4] = np.array(
                 [
                     _norm(organ_pos["x"], MAP_SIZE),
