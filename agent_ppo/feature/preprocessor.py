@@ -343,14 +343,14 @@ class Preprocessor:
         dist_shaping_norm_weight = 12.8
 
         reward_vector = [
-            1.0 * score_gain,
-            0.8 * dist_shaping_norm_weight * monster_dist_reward,
-            0.5 * treasure_reward,
-            0.5 * dist_shaping_norm_weight * treasure_dist_reward,
-            0.1 * buff_reward,
-            0.1 * dist_shaping_norm_weight * buff_dist_reward,
-            dist_shaping_norm_weight * flash_reward,
-            wall_penalty,
+            0.30 * score_gain,
+            0.35 * dist_shaping_norm_weight * monster_dist_reward,
+            0.20 * treasure_reward,
+            0.35 * dist_shaping_norm_weight * treasure_dist_reward,
+            0.05 * buff_reward,
+            0.05 * dist_shaping_norm_weight * buff_dist_reward,
+            0.25 * dist_shaping_norm_weight * flash_reward,
+            1.00 * wall_penalty,
         ]
 
         return reward_vector, sum(reward_vector)
