@@ -26,15 +26,21 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     agent = agents[0]
 
     # Read user config / 读取用户配置
-    usr_conf = read_usr_conf("agent_ppo/conf/train_env_conf.toml", logger)
-    if usr_conf is None:
-        logger.error("usr_conf is None, please check agent_ppo/conf/train_env_conf.toml")
+    train_usr_conf = read_usr_conf("agent_ppo/conf/train_env_conf.toml", logger)
+    if train_usr_conf is None:
+        logger.error("train_usr_conf is None, please check agent_ppo/conf/train_env_conf.toml")
+        return
+
+    val_usr_conf = read_usr_conf("agent_ppo/conf/val_env_conf.toml", logger)
+    if val_usr_conf is None:
+        logger.error("val_usr_conf is None, please check agent_ppo/conf/val_env_conf.toml")
         return
 
     episode_runner = EpisodeRunner(
         env=env,
         agent=agent,
-        usr_conf=usr_conf,
+        train_usr_conf=train_usr_conf,
+        val_usr_conf=val_usr_conf,
         logger=logger,
         monitor=monitor,
     )
@@ -51,15 +57,19 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
 
 
 class EpisodeRunner:
-    def __init__(self, env, agent, usr_conf, logger, monitor):
+    def __init__(self, env, agent, train_usr_conf, val_usr_conf, logger, monitor):
         self.env = env
         self.agent = agent
-        self.usr_conf = usr_conf
+        self.train_usr_conf = train_usr_conf
+        self.val_usr_conf = val_usr_conf
         self.logger = logger
         self.monitor = monitor
         self.episode_cnt = 0
         self.last_report_monitor_time = 0
         self.last_get_training_metrics_time = 0
+
+        self.val_every_n_episode = 40
+        self.val_episode_num = 10
 
     def run_episodes(self):
         """Run a single episode and yield collected samples.
@@ -76,7 +86,7 @@ class EpisodeRunner:
                     self.logger.info(f"training_metrics is {training_metrics}")
 
             # Reset env / 重置环境
-            env_obs = self.env.reset(self.usr_conf)
+            env_obs = self.env.reset(self.train_usr_conf)
 
             # Disaster recovery / 容灾处理
             if handle_disaster_recovery(env_obs, self.logger):
@@ -172,6 +182,10 @@ class EpisodeRunner:
                         self.monitor.put_data({os.getpid(): monitor_data})
                         self.last_report_monitor_time = now
 
+                    if self.episode_cnt % self.val_every_n_episode == 0:
+                        self.logger.info(f"[VAL] start validation at episode {self.episode_cnt}")
+                        self.run_validation()
+
                     if collector:
                         collector = sample_process(collector)
                         yield collector
@@ -180,3 +194,80 @@ class EpisodeRunner:
                 # Update state / 状态更新
                 obs_data = _obs_data
                 remain_info = _remain_info
+
+    def run_one_eval_episode(self):
+        env_obs = self.env.reset(self.val_usr_conf)
+
+        if handle_disaster_recovery(env_obs, self.logger):
+            return None
+
+        self.agent.reset(env_obs)
+        self.agent.load_model(id="latest")
+
+        done = False
+        step = 0
+        while not done:
+            act = self.agent.exploit(env_obs)
+            env_reward, env_obs = self.env.step(act)
+
+            if handle_disaster_recovery(env_obs, self.logger):
+                return None
+
+            terminated = env_obs["terminated"]
+            truncated = env_obs["truncated"]
+            done = terminated or truncated
+            step += 1
+
+        env_info = env_obs["observation"]["env_info"]
+
+        result = {
+            "steps": step,
+            "total_score": env_info.get("total_score", 0.0),
+            "treasures_collected": env_info.get("treasures_collected", 0),
+            "collected_buff": env_info.get("collected_buff", 0),
+            "flash_count": env_info.get("flash_count", 0),
+            "terminated": bool(env_obs["terminated"]),
+            "truncated": bool(env_obs["truncated"]),
+        }
+        return result
+    
+    def run_validation(self):
+        results = []
+
+        for _ in range(self.val_episode_num):
+            r = self.run_one_eval_episode()
+            if r is not None:
+                results.append(r)
+
+        if not results:
+            self.logger.info("[VAL] no valid results")
+            return
+
+        avg_score = np.mean([x["total_score"] for x in results])
+        avg_steps = np.mean([x["steps"] for x in results])
+        avg_treasures = np.mean([x["treasures_collected"] for x in results])
+        avg_buffs = np.mean([x["collected_buff"] for x in results])
+        avg_flash = np.mean([x["flash_count"] for x in results])
+        term_rate = np.mean([1.0 if x["terminated"] else 0.0 for x in results])
+
+        self.logger.info(
+            f"[VAL] episodes:{len(results)} "
+            f"avg_score:{avg_score:.2f} "
+            f"avg_steps:{avg_steps:.2f} "
+            f"avg_treasures:{avg_treasures:.2f} "
+            f"avg_buffs:{avg_buffs:.2f} "
+            f"avg_flash:{avg_flash:.2f} "
+            f"terminated_rate:{term_rate:.2%}"
+        )
+
+        if self.monitor:
+            self.monitor.put_data({
+                os.getpid(): {
+                    "val_score": round(float(avg_score), 4),
+                    "val_steps": round(float(avg_steps), 4),
+                    "val_treasures": round(float(avg_treasures), 4),
+                    "val_buffs": round(float(avg_buffs), 4),
+                    "val_flash": round(float(avg_flash), 4),
+                    "val_terminated_rate": round(float(term_rate), 4),
+                }
+            })

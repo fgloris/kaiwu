@@ -78,6 +78,31 @@ def build_monitor():
         )
         .end_panel()
         .end_group()
+
+        # 新增：环境测试指标
+        .add_group(
+            group_name="环境指标",
+            group_name_en="env",
+        )
+        .add_panel(
+            name="测试环境得分",
+            name_en="eval_env_scores",
+            type="line",
+        )
+        .add_metric(
+            metrics_name="eval_total_score",
+            expr="avg(eval_total_score{})",
+        )
+        .add_metric(
+            metrics_name="eval_treasure_score",
+            expr="avg(eval_treasure_score{})",
+        )
+        .add_metric(
+            metrics_name="eval_step_score",
+            expr="avg(eval_step_score{})",
+        )
+        .end_panel()
+        .end_group()
         .build()
     )
     return config_dict
