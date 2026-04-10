@@ -37,7 +37,7 @@ class Config:
     # PPO hyperparameters / PPO 超参数
     GAMMA = 0.99
     LAMDA = 0.95
-    INIT_LEARNING_RATE_START = 0.0003 * 0.2
+    INIT_LEARNING_RATE_START = 0.0003
     BETA_START = 0.001
     CLIP_PARAM = 0.2
     VF_COEF = 1.0

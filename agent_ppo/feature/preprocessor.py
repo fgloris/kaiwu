@@ -268,10 +268,10 @@ class Preprocessor:
             1.0 * score_gain
             + survive_reward
             + 0.1 * dist_shaping
-            + 0.3 * flash_reward
-            + 0.5 * treasure_reward
-            + 0.08 * treasure_dist_reward
-            + 0.3 * buff_reward
+            + 0.1 * flash_reward
+            + 0.8 * treasure_reward
+            + 0.4 * treasure_dist_reward
+            + 0.2 * buff_reward
             + 0.04 * buff_dist_reward
         )
         reward = [reward_scalar]
