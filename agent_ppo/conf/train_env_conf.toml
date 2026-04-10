@@ -33,4 +33,4 @@ monster_speedup = 500
 
 # Maximum steps per episode. The episode ends when this limit is reached. Range: 1~2000.
 # 最大步数。单局任务预测步数达到最大步数时，任务结束。可配置范围为1～2000。
-max_step = 1000
+max_step = 2000
