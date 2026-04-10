@@ -45,6 +45,8 @@ class Preprocessor:
         self.last_treasure_collected = 0
         self.last_collected_buff = 0
         self.last_flash_count = 0
+        self.last_nearest_treasure_dist_norm = 0
+        self.last_nearest_buff_dist_norm = 0
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -107,37 +109,43 @@ class Preprocessor:
         treasure_feat = np.array([1.0, 0.0], dtype=np.float32)
         buff_feat = np.array([1.0, 0.0], dtype=np.float32)
 
-        nearest_treasure = None
-        nearest_buff = None
+        treasure_feat = np.zeros(4, dtype=np.float32)  # 前2个宝箱：每个2维
+        buff_feat = np.zeros(4, dtype=np.float32)      # 前2个buff：每个2维
+
+        treasures = []
+        buffs = []
 
         for organ in organs:
             if organ.get("status", 0) != 1:
                 continue
-
             sub_type = organ.get("sub_type", 0)
-            dist_bucket = organ.get("hero_l2_distance", MAX_DIST_BUCKET)
-
             if sub_type == 1:
-                if nearest_treasure is None or dist_bucket < nearest_treasure["hero_l2_distance"]:
-                    nearest_treasure = organ
+                treasures.append(organ)
             elif sub_type == 2:
-                if nearest_buff is None or dist_bucket < nearest_buff["hero_l2_distance"]:
-                    nearest_buff = organ
+                buffs.append(organ)
 
-        if nearest_treasure is not None:
-            treasure_feat = np.array(
+        treasures.sort(key=lambda x: x.get("hero_l2_distance", MAX_DIST_BUCKET))
+        buffs.sort(key=lambda x: x.get("hero_l2_distance", MAX_DIST_BUCKET))
+
+        for i, organ in enumerate(treasures[:2]):
+            organ_pos = organ["pos"]
+            treasure_feat[i * 4 : i * 4 + 4] = np.array(
                 [
-                    _norm(nearest_treasure.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
-                    _norm(nearest_treasure.get("hero_relative_direction", 0), 8.0),
+                    _norm(organ_pos["x"], MAP_SIZE),
+                    _norm(organ_pos["z"], MAP_SIZE),
+                    _norm(organ.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
+                    _norm(organ.get("hero_relative_direction", 0), 8.0),
                 ],
                 dtype=np.float32,
             )
 
-        if nearest_buff is not None:
-            buff_feat = np.array(
+        for i, organ in enumerate(buffs[:2]):
+            buff_feat[i * 4 : i * 4 + 4] = np.array(
                 [
-                    _norm(nearest_buff.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
-                    _norm(nearest_buff.get("hero_relative_direction", 0), 8.0),
+                    _norm(organ_pos["x"], MAP_SIZE),
+                    _norm(organ_pos["z"], MAP_SIZE),
+                    _norm(organ.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
+                    _norm(organ.get("hero_relative_direction", 0), 8.0),
                 ],
                 dtype=np.float32,
             )
@@ -174,8 +182,38 @@ class Preprocessor:
 
         step_norm = _norm(self.step_no, self.max_step)
         progress_treasure_collect = _norm(int(hero.get("treasure_collected_count", 0)), 10)
-        #survival_ratio = step_norm * (0.5 + 0.5 * cur_min_dist_norm)
         progress_feat = np.array([step_norm, progress_treasure_collect], dtype=np.float32)
+
+        # Nearest treasure / buff distance shaping
+        cur_nearest_treasure_dist_norm = 1.0
+        if len(treasures) > 0:
+            cur_nearest_treasure_dist_norm = _norm(
+                treasures[0].get("hero_l2_distance", MAX_DIST_BUCKET),
+                MAX_DIST_BUCKET,
+            )
+
+        cur_nearest_buff_dist_norm = 1.0
+        if len(buffs) > 0:
+            cur_nearest_buff_dist_norm = _norm(
+                buffs[0].get("hero_l2_distance", MAX_DIST_BUCKET),
+                MAX_DIST_BUCKET,
+            )
+
+        treasure_dist_delta = self.last_nearest_treasure_dist_norm - cur_nearest_treasure_dist_norm
+        buff_dist_delta = self.last_nearest_buff_dist_norm - cur_nearest_buff_dist_norm
+
+        treasure_dist_reward = 0.0
+        buff_dist_reward = 0.0
+
+        # 只有在目标还存在时才做距离塑形
+        if len(treasures) > 0:
+            treasure_dist_reward = treasure_dist_delta
+
+        if len(buffs) > 0:
+            buff_dist_reward = buff_dist_delta
+
+        self.last_nearest_treasure_dist_norm = cur_nearest_treasure_dist_norm
+        self.last_nearest_buff_dist_norm = cur_nearest_buff_dist_norm
 
         # Concatenate features / 拼接特征
         feature = np.concatenate(
@@ -225,7 +263,16 @@ class Preprocessor:
         flash_reward = max(0, flash_gain)
 
         # final step reward scalar
-        reward_scalar = 1.0 * score_gain + survive_reward + 0.1 * dist_shaping + 0.5 * treasure_reward + 0.3 * buff_reward + 0.3 * flash_reward
+        reward_scalar = (
+            1.0 * score_gain
+            + survive_reward
+            + 0.1 * dist_shaping
+            + 0.5 * treasure_reward
+            + 0.3 * buff_reward
+            + 0.3 * flash_reward
+            + 0.08 * treasure_dist_reward
+            + 0.04 * buff_dist_reward
+        )
         reward = [reward_scalar]
 
         return feature, legal_action, reward

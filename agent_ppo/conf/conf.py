@@ -18,8 +18,8 @@ class Config:
         4,   # 鲁班自身
         6,   # 怪物1
         6,   # 怪物2
-        2,   # 宝箱特征（最近一个）
-        2,   # buff特征（最近一个）
+        8,   # 宝箱特征（最近两个）
+        8,   # buff特征（最近两个）
         16,  # 局部地图
         16,   # 合法动作mask
         2,   # 进度特征
@@ -37,7 +37,7 @@ class Config:
     # PPO hyperparameters / PPO 超参数
     GAMMA = 0.99
     LAMDA = 0.95
-    INIT_LEARNING_RATE_START = 0.0003
+    INIT_LEARNING_RATE_START = 0.0003 * 0.2
     BETA_START = 0.001
     CLIP_PARAM = 0.2
     VF_COEF = 1.0
