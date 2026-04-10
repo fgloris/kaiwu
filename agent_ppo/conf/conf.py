@@ -2,21 +2,26 @@
 # -*- coding: UTF-8 -*-
 
 class Config:
-    # Feature layout
-    # hero_self: 8
-    # monsters: 2 x 6 = 12
-    # treasures: 4 x 6 = 24
-    # buffs: 2 x 6 = 12
-    # map_local: 25
-    # legal_action: 16
-    # progress: 4
-    # last_action_one_hot: 16
-    FEATURES = [8, 12, 24, 12, 25, 16, 4, 16]
+
+    # Feature dimensions / 特征维度（共40维）
+    FEATURES = [
+        4,   # 鲁班自身
+        6,   # 怪物1
+        6,   # 怪物2
+        2,   # 宝箱特征（最近一个）
+        2,   # buff特征（最近一个）
+        16,  # 局部地图
+        16,   # 合法动作mask
+        2,   # 进度特征
+    ]
     FEATURE_SPLIT_SHAPE = FEATURES
     FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)
     DIM_OF_OBSERVATION = FEATURE_LEN
 
+    # Action space / 动作空间：8个移动方向
     ACTION_NUM = 16
+
+    # Value head / 价值头：单头生存奖励
     VALUE_NUM = 1
 
     GAMMA = 0.99

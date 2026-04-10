@@ -24,22 +24,20 @@ class Model(nn.Module):
         value_num = Config.VALUE_NUM
 
         self.backbone = nn.Sequential(
-            make_fc_layer(input_dim, 256, gain=1.0),
-            nn.Tanh(),
-            make_fc_layer(256, 256, gain=1.0),
-            nn.Tanh(),
-            make_fc_layer(256, 128, gain=1.0),
-            nn.Tanh(),
+            make_fc_layer(input_dim, 256),
+            nn.ReLU(),
+            make_fc_layer(256, 256),
+            nn.ReLU(),
         )
         self.actor_head = nn.Sequential(
-            make_fc_layer(128, 64, gain=1.0),
-            nn.Tanh(),
-            make_fc_layer(64, action_num, gain=0.01),
+            make_fc_layer(256, 128),
+            nn.ReLU(),
+            make_fc_layer(128, action_num),
         )
         self.critic_head = nn.Sequential(
-            make_fc_layer(128, 64, gain=1.0),
-            nn.Tanh(),
-            make_fc_layer(64, value_num, gain=1.0),
+            make_fc_layer(256, 128),
+            nn.ReLU(),
+            make_fc_layer(128, value_num),
         )
 
     def forward(self, obs, inference=False):

@@ -25,5 +25,5 @@ if __name__ == "__main__":
             "preload_ratio": "0.5",
             "train_batch_size": "64",
             "dump_model_freq": "10",
-        }
+        },
     )

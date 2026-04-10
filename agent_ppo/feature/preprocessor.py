@@ -45,13 +45,9 @@ class Preprocessor:
         self.step_no = 0
         self.max_step = 1000
         self.last_total_score = 0.0
-        self.last_step_score = 0.0
-        self.last_treasure_score = 0.0
-        self.last_treasures_collected = 0
+        self.last_treasure_collected = 0
         self.last_collected_buff = 0
         self.last_flash_count = 0
-        self.last_min_monster_dist = 5.0
-        self.last_min_treasure_dist = 5.0
 
     def feature_process(self, env_obs, last_action):
         observation = env_obs["observation"]
@@ -89,39 +85,72 @@ class Preprocessor:
         min_monster_dist = MAX_DIST_BUCKET
         for i in range(2):
             if i < len(monsters):
-                m = monsters[i] or {}
-                mx, mz = _get_pos(m)
-                dist_bucket = float(m.get("hero_l2_distance", MAX_DIST_BUCKET))
-                dir_id = int(m.get("hero_relative_direction", 0))
-                dx_vec, dz_vec = _dir_vec(dir_id)
-                if mx == 0.0 and mz == 0.0 and dir_id != 0:
-                    dx = dx_vec * (dist_bucket + 1.0) / 6.0
-                    dz = dz_vec * (dist_bucket + 1.0) / 6.0
+                m = monsters[i]
+                # 当 is_in_view = 0 时，仅有 hero_relative_direction 有效
+                # {'hero_l2_distance': 0, 'hero_relative_direction': 2, 'monster_id': 14, 'monster_interval': 300, 'pos': {'x': 105, 'z': 56}, 'speed': 1, 'is_in_view': 1}
+                is_in_view = float(m.get("is_in_view", 0))
+                m_pos = m["pos"]
+                dir_norm = _norm(m.get("hero_relative_direction", 0), 8.0)
+
+                if is_in_view:
+                    m_x_norm = _norm(m_pos["x"], MAP_SIZE)
+                    m_z_norm = _norm(m_pos["z"], MAP_SIZE)
+                    m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED)
+                    # Euclidean distance / 欧式距离
+                    raw_dist = np.sqrt((hero_pos["x"] - m_pos["x"]) ** 2 + (hero_pos["z"] - m_pos["z"]) ** 2)
+                    dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
                 else:
-                    dx = (mx - hero_x) / MAP_SIZE
-                    dz = (mz - hero_z) / MAP_SIZE
-                min_monster_dist = min(min_monster_dist, dist_bucket)
+                    m_x_norm = 0.0
+                    m_z_norm = 0.0
+                    m_speed_norm = 0.0
+                    dist_norm = 1.0
+                    
                 monster_feats.append(
-                    np.array(
-                        [
-                            1.0,
-                            dx,
-                            dz,
-                            _norm(m.get("speed", 1), MAX_MONSTER_SPEED),
-                            _norm(dist_bucket, MAX_DIST_BUCKET),
-                            dir_id / 8.0,
-                        ],
-                        dtype=np.float32,
-                    )
+                    np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm, dir_norm], dtype=np.float32)
                 )
             else:
                 monster_feats.append(np.zeros(6, dtype=np.float32))
 
-        organs = frame_state.get("organs", []) or []
-        treasures = [o for o in organs if int(o.get("sub_type", 0)) == 1 and int(o.get("status", 0)) == 1]
-        buffs = [o for o in organs if int(o.get("sub_type", 0)) == 2 and int(o.get("status", 0)) == 1]
-        treasures.sort(key=lambda x: (x.get("hero_l2_distance", 99), x.get("config_id", 0)))
-        buffs.sort(key=lambda x: (x.get("hero_l2_distance", 99), x.get("config_id", 0)))
+        # Organ features
+        organs = frame_state.get("organs", [])
+
+        treasure_feat = np.array([1.0, 0.0], dtype=np.float32)
+        buff_feat = np.array([1.0, 0.0], dtype=np.float32)
+
+        nearest_treasure = None
+        nearest_buff = None
+
+        for organ in organs:
+            if organ.get("status", 0) != 1:
+                continue
+
+            sub_type = organ.get("sub_type", 0)
+            dist_bucket = organ.get("hero_l2_distance", MAX_DIST_BUCKET)
+
+            if sub_type == 1:
+                if nearest_treasure is None or dist_bucket < nearest_treasure["hero_l2_distance"]:
+                    nearest_treasure = organ
+            elif sub_type == 2:
+                if nearest_buff is None or dist_bucket < nearest_buff["hero_l2_distance"]:
+                    nearest_buff = organ
+
+        if nearest_treasure is not None:
+            treasure_feat = np.array(
+                [
+                    _norm(nearest_treasure.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
+                    _norm(nearest_treasure.get("hero_relative_direction", 0), 8.0),
+                ],
+                dtype=np.float32,
+            )
+
+        if nearest_buff is not None:
+            buff_feat = np.array(
+                [
+                    _norm(nearest_buff.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
+                    _norm(nearest_buff.get("hero_relative_direction", 0), 8.0),
+                ],
+                dtype=np.float32,
+            )
 
         treasure_feats, min_treasure_dist = self._encode_targets(treasures, hero_pos, topk=4)
         buff_feats, _ = self._encode_targets(buffs, hero_pos, topk=2)
@@ -139,29 +168,37 @@ class Preprocessor:
                         map_feat[flat_idx] = float(map_info[row][col] != 0)
                     flat_idx += 1
 
-        legal_action = self._build_legal_action(legal_act_raw)
+        # Legal action mask (8D) / 合法动作掩码
+        legal_action = [1] * 16
+        if isinstance(legal_act_raw, list) and legal_act_raw:
+            if isinstance(legal_act_raw[0], bool):
+                for j in range(min(16, len(legal_act_raw))):
+                    legal_action[j] = int(legal_act_raw[j])
+            else:
+                valid_set = {int(a) for a in legal_act_raw if int(a) < 16}
+                legal_action = [1 if j in valid_set else 0 for j in range(16)]
 
-        progress_feat = np.array(
-            [
-                _norm(self.step_no, max(self.max_step, 1)),
-                _norm(max(self.max_step - self.step_no, 0), max(self.max_step, 1)),
-                _norm(len(treasures), max(env_info.get("total_treasure", 10), 1)),
-                _norm(env_info.get("flash_count", 0), 20.0),
-            ],
-            dtype=np.float32,
-        )
+        if sum(legal_action) == 0:
+            legal_action = [1] * 16
 
-        last_action_feat = np.zeros(16, dtype=np.float32)
-        if 0 <= int(last_action) < 16:
-            last_action_feat[int(last_action)] = 1.0
+        # Progress features (2D) / 进度特征
+        cur_min_dist_norm = 1.0
+        for m_feat in monster_feats:
+            if m_feat[0] > 0:
+                cur_min_dist_norm = min(cur_min_dist_norm, m_feat[4])
+
+        step_norm = _norm(self.step_no, self.max_step)
+        progress_treasure_collect = _norm(int(hero.get("treasure_collected_count", 0)), 10)
+        #survival_ratio = step_norm * (0.5 + 0.5 * cur_min_dist_norm)
+        progress_feat = np.array([step_norm, progress_treasure_collect], dtype=np.float32)
 
         feature = np.concatenate(
             [
                 hero_feat,
                 monster_feats[0],
                 monster_feats[1],
-                treasure_feats,
-                buff_feats,
+                treasure_feat,
+                buff_feat,
                 map_feat,
                 np.array(legal_action, dtype=np.float32),
                 progress_feat,
@@ -169,44 +206,9 @@ class Preprocessor:
             ]
         ).astype(np.float32)
 
-        reward = [self._build_reward(env_info, min_monster_dist, min_treasure_dist, last_action)]
-        return feature, legal_action, reward
-
-    def _encode_targets(self, entities, hero_pos, topk):
-        feats = []
-        min_dist = MAX_DIST_BUCKET
-        hero_x = hero_pos["x"]
-        hero_z = hero_pos["z"]
-        for i in range(topk):
-            if i < len(entities):
-                e = entities[i] or {}
-                ex, ez = _get_pos(e)
-                dist_bucket = float(e.get("hero_l2_distance", MAX_DIST_BUCKET))
-                dir_id = int(e.get("hero_relative_direction", 0))
-                dx_vec, dz_vec = _dir_vec(dir_id)
-                if ex == 0.0 and ez == 0.0 and dir_id != 0:
-                    dx = dx_vec * (dist_bucket + 1.0) / 6.0
-                    dz = dz_vec * (dist_bucket + 1.0) / 6.0
-                else:
-                    dx = (ex - hero_x) / MAP_SIZE
-                    dz = (ez - hero_z) / MAP_SIZE
-                min_dist = min(min_dist, dist_bucket)
-                feats.append(
-                    np.array(
-                        [
-                            1.0,
-                            dx,
-                            dz,
-                            _norm(dist_bucket, MAX_DIST_BUCKET),
-                            dir_id / 8.0,
-                            float(e.get("status", 1)),
-                        ],
-                        dtype=np.float32,
-                    )
-                )
-            else:
-                feats.append(np.zeros(6, dtype=np.float32))
-        return np.concatenate(feats).astype(np.float32), min_dist
+        # Step reward / 即时奖励
+        survive_reward = 0.01
+        dist_shaping = 0.1 * (cur_min_dist_norm - self.last_min_monster_dist_norm)
 
     def _build_legal_action(self, legal_act_raw):
         legal_action = [1] * 16
@@ -236,14 +238,30 @@ class Preprocessor:
         buff_gain = cur_collected_buff - self.last_collected_buff
         flash_gain = cur_flash_count - self.last_flash_count
 
-        dist_gain = min_monster_dist - self.last_min_monster_dist
-        treasure_approach = self.last_min_treasure_dist - min_treasure_dist if min_treasure_dist < MAX_DIST_BUCKET else 0.0
+        # 3) 宝箱收集奖励
+        cur_treasure_collected = int(hero.get("treasure_collected_count", 0))
+        treasure_gain = cur_treasure_collected - self.last_treasure_collected
+        self.last_treasure_collected = cur_treasure_collected
 
-        flash_escape_bonus = 0.0
-        if flash_gain > 0 and self.last_min_monster_dist <= 1.0:
-            flash_escape_bonus = 0.15
-        elif flash_gain > 0 and self.last_min_monster_dist >= 3.0:
-            flash_escape_bonus = -0.03
+        treasure_reward = max(0, treasure_gain)
+
+        # 4) buff收集奖励
+        cur_collected_buff = int(env_info.get("collected_buff", 0))
+        buff_gain = cur_collected_buff - self.last_collected_buff
+        self.last_collected_buff = cur_collected_buff
+
+        buff_reward = max(0, buff_gain)
+
+        # 5) 闪现释放奖励
+        flash_count = env_info.get("flash_count", 0)
+        flash_gain = flash_count - self.last_flash_count
+        self.last_flash_count = flash_count
+
+        flash_reward = max(0, flash_gain)
+
+        # final step reward scalar
+        reward_scalar = 1.0 * score_gain + survive_reward + 0.1 * dist_shaping + 0.5 * treasure_reward + 0.3 * buff_reward + 0.3 * flash_reward
+        reward = [reward_scalar]
 
         reward_scalar = (
             0.01 * score_gain
