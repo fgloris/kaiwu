@@ -40,13 +40,19 @@ class Preprocessor:
     def reset(self):
         self.step_no = 0
         self.max_step = 200
-        self.last_min_monster_dist_norm = 0.5
+
+        self.last_monster_dist_norm_1 = -1.0
+        self.last_monster_dist_norm_2 = -1.0
+
         self.last_total_score = 0.0
         self.last_treasure_collected = 0
         self.last_collected_buff = 0
         self.last_flash_count = 0
-        self.last_nearest_treasure_dist_norm = 0
-        self.last_nearest_buff_dist_norm = 0
+
+        self.last_treasure_dist_norm_1 = 0.0
+        self.last_treasure_dist_norm_2 = 0.0
+        self.last_buff_dist_norm_1 = 0.0
+        self.last_buff_dist_norm_2 = 0.0
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -179,7 +185,7 @@ class Preprocessor:
         progress_feat = np.array([step_norm, progress_treasure_collect], dtype=np.float32)
 
         # Concatenate features / 拼接特征
-        vector_feature = np.concatenate(
+        vector_feat = np.concatenate(
             [
                 hero_feat,
                 monster_feats[0],
@@ -191,58 +197,78 @@ class Preprocessor:
             ]
         )
 
-        # ======================================= reward 计算 ============================================
+        reward_feats = {
+            "monster_feats": monster_feats,
+            "treasure_feats": treasures,
+            "buff_feats": buffs,
+        }
 
-        # 生存 reward
-        survive_reward = 0.01
-        
-        # 怪物 dist shaping
-        cur_monster_dist_norm = 1.0
-        for m_feat in monster_feats:
-            if m_feat[0] > 0:
-                cur_monster_dist_norm = min(cur_monster_dist_norm, m_feat[4])
-        dist_shaping = 0.1 * (cur_monster_dist_norm - self.last_min_monster_dist_norm)
-
-        self.last_min_monster_dist_norm = cur_monster_dist_norm
-
-        # buff和宝箱 distance shaping
-        cur_nearest_treasure_dist_norm = 1.0
-        if len(treasures) > 0:
-            cur_nearest_treasure_dist_norm = _norm(
-                treasures[0].get("hero_l2_distance", MAX_DIST_BUCKET),
-                MAX_DIST_BUCKET,
-            )
-
-        cur_nearest_buff_dist_norm = 1.0
-        if len(buffs) > 0:
-            cur_nearest_buff_dist_norm = _norm(
-                buffs[0].get("hero_l2_distance", MAX_DIST_BUCKET),
-                MAX_DIST_BUCKET,
-            )
-
-        treasure_dist_delta = self.last_nearest_treasure_dist_norm - cur_nearest_treasure_dist_norm
-        buff_dist_delta = self.last_nearest_buff_dist_norm - cur_nearest_buff_dist_norm
-
-        treasure_dist_reward = 0.0
-        buff_dist_reward = 0.0
-
-        if len(treasures) > 0:
-            treasure_dist_reward = treasure_dist_delta
-
-        if len(buffs) > 0:
-            buff_dist_reward = buff_dist_delta
-
-        self.last_nearest_treasure_dist_norm = cur_nearest_treasure_dist_norm
-        self.last_nearest_buff_dist_norm = cur_nearest_buff_dist_norm
-
+        return vector_feat, map_feat, reward_feats, legal_action
+    
+    def calculate_reward(self, env_obs, reward_feats):
         # 基于比赛分数增量的奖励
         env_info = env_obs["observation"].get("env_info", {})
         cur_total_score = float(env_info.get("total_score", 0.0))
         score_gain = cur_total_score - self.last_total_score
         self.last_total_score = cur_total_score
+        
+        # 怪物 dist shaping
+        # 防止首帧的错误 reward
+
+        monster_dist_reward = 0.0
+        if self.last_monster_dist_norm_1 >= 0  and self.last_monster_dist_norm_2 >= 0:
+            monster_dist_reward = \
+                ( reward_feats['monster_feat'][0][4] - self.last_monster_dist_norm_1) + \
+                0.2 * (reward_feats['monster_feat'][1][4] - self.last_monster_dist_norm_2)
+            
+        self.last_monster_dist_norm_1 = reward_feats['monster_feat'][0][4]
+        self.last_monster_dist_norm_2 = reward_feats['monster_feat'][1][4]
+
+        # buff和宝箱 distance shaping
+        # 靠近奖励但远离不惩罚
+
+        treasure_dist_norm_1 = 0.0
+        treasure_dist_norm_2 = 0.0
+        if len(reward_feats['treasure_feats']) > 0: 
+            treasure_dist_norm_1 = _norm(
+                reward_feats['treasure_feats'][0].get("hero_l2_distance", MAX_DIST_BUCKET),
+                MAX_DIST_BUCKET,
+            )
+            
+        if len(reward_feats['treasure_feats']) > 1:
+            treasure_dist_norm_2 = _norm(
+                reward_feats['treasure_feats'][1].get("hero_l2_distance", MAX_DIST_BUCKET),
+                MAX_DIST_BUCKET,
+            )
+
+        treasure_dist_reward = max(0.0, (self.last_treasure_dist_norm_1 - treasure_dist_norm_1) + 
+                            0.2 * (self.last_treasure_dist_norm_2 - treasure_dist_norm_2))
+        
+        self.last_treasure_dist_norm_1 = treasure_dist_norm_1
+        self.last_treasure_dist_norm_2 = treasure_dist_norm_2
+
+        buff_dist_norm_1 = 0.0
+        buff_dist_norm_2 = 0.0
+        if len(reward_feats['buff_feats']) > 0: 
+            buff_dist_norm_1 = _norm(
+                reward_feats['buff_feats'][0].get("hero_l2_distance", MAX_DIST_BUCKET),
+                MAX_DIST_BUCKET,
+            )
+            
+        if len(reward_feats['buff_feats']) > 1:
+            buff_dist_norm_2 = _norm(
+                reward_feats['buff_feats'][1].get("hero_l2_distance", MAX_DIST_BUCKET),
+                MAX_DIST_BUCKET,
+            )
+
+        buff_dist_reward = max(0.0, (self.last_buff_dist_norm_1 - buff_dist_norm_1) + 
+                        0.2 * (self.last_buff_dist_norm_2 - buff_dist_norm_2))
+        
+        self.last_buff_dist_norm_1 = buff_dist_norm_1
+        self.last_buff_dist_norm_2 = buff_dist_norm_2
 
         # 宝箱收集奖励
-        cur_treasure_collected = int(hero.get("treasure_collected_count", 0))
+        cur_treasure_collected = int(env_obs["observation"]["frame_state"]["hero"].get("treasure_collected_count", 0))
         treasure_gain = cur_treasure_collected - self.last_treasure_collected
         self.last_treasure_collected = cur_treasure_collected
 
@@ -256,23 +282,26 @@ class Preprocessor:
         buff_reward = max(0, buff_gain)
 
         # 闪现释放奖励
+        flash_reward = 0.0
         flash_count = env_info.get("flash_count", 0)
-        flash_gain = flash_count - self.last_flash_count
+        if (flash_count - self.last_flash_count) > 0:
+            flash_reward = 2.0 * (0.8 * monster_dist_reward + 0.5 * treasure_dist_reward + 0.1 * buff_dist_reward)
         self.last_flash_count = flash_count
 
-        flash_reward = max(0, flash_gain)
+        # 撞墙惩罚
 
-        # final step reward scalar
-        reward_scalar = (
-            1.0 * score_gain
-            + survive_reward
-            + 0.1 * dist_shaping
-            + 0.1 * flash_reward
-            + 0.8 * treasure_reward
-            + 0.4 * treasure_dist_reward
-            + 0.2 * buff_reward
-            + 0.04 * buff_dist_reward
-        )
-        reward = [reward_scalar]
+        # final step reward vector
 
-        return vector_feature, map_feat, legal_action, reward
+        dist_shaping_norm_weight = 12.8
+
+        reward_vector = [
+            1.0 * score_gain,
+            0.8 * dist_shaping_norm_weight * monster_dist_reward,
+            0.5 * treasure_reward,
+            0.5 * dist_shaping_norm_weight * treasure_dist_reward,
+            0.1 * buff_reward,
+            0.1 * dist_shaping_norm_weight * buff_dist_reward,
+            dist_shaping_norm_weight * flash_reward
+        ]
+
+        return reward_vector, sum(reward_vector)
