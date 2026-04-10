@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
-###########################################################################
-# Copyright © 1998 - 2026 Tencent. All Rights Reserved.
-###########################################################################
-"""
-Author: Tencent AI Arena Authors
-
-Configuration for Gorge Chase PPO.
-峡谷追猎 PPO 配置。
-"""
-
 
 class Config:
 
@@ -34,11 +24,15 @@ class Config:
     # Value head / 价值头：单头生存奖励
     VALUE_NUM = 1
 
-    # PPO hyperparameters / PPO 超参数
     GAMMA = 0.99
     LAMDA = 0.95
-    INIT_LEARNING_RATE_START = 0.0003
-    BETA_START = 0.001
+    INIT_LEARNING_RATE_START = 3e-4
+    BETA_START = 0.005
     CLIP_PARAM = 0.2
-    VF_COEF = 1.0
+    VF_COEF = 0.5
     GRAD_CLIP_RANGE = 0.5
+
+    PPO_EPOCH = 4
+    MINIBATCH_SIZE = 128
+    MAX_BATCH_SIZE = 4096
+    ADV_NORM_EPS = 1e-8

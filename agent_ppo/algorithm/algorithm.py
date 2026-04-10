@@ -1,25 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
-###########################################################################
-# Copyright © 1998 - 2026 Tencent. All Rights Reserved.
-###########################################################################
-"""
-Author: Tencent AI Arena Authors
-
-PPO algorithm implementation for Gorge Chase PPO.
-峡谷追猎 PPO 算法实现。
-
-损失组成：
-  total_loss = vf_coef * value_loss + policy_loss - beta * entropy_loss
-
-  - value_loss  : Clipped value function loss（裁剪价值函数损失）
-  - policy_loss : PPO Clipped surrogate objective（PPO 裁剪替代目标）
-  - entropy_loss: Action entropy regularization（动作熵正则化，鼓励探索）
-"""
 
 import os
 import time
-
 import torch
 from agent_ppo.conf.conf import Config
 
@@ -38,60 +21,80 @@ class Algorithm:
         self.var_beta = Config.BETA_START
         self.vf_coef = Config.VF_COEF
         self.clip_param = Config.CLIP_PARAM
+        self.ppo_epoch = Config.PPO_EPOCH
+        self.minibatch_size = Config.MINIBATCH_SIZE
 
         self.last_report_monitor_time = 0
         self.train_step = 0
 
     def learn(self, list_sample_data):
-        """Training entry: PPO update on a batch of SampleData.
+        if not list_sample_data:
+            return
 
-        训练入口：对一批 SampleData 执行 PPO 更新。
-        """
-        obs = torch.stack([f.obs for f in list_sample_data]).to(self.device)
-        legal_action = torch.stack([f.legal_action for f in list_sample_data]).to(self.device)
-        act = torch.stack([f.act for f in list_sample_data]).to(self.device).view(-1, 1)
-        old_prob = torch.stack([f.prob for f in list_sample_data]).to(self.device)
-        reward = torch.stack([f.reward for f in list_sample_data]).to(self.device)
-        advantage = torch.stack([f.advantage for f in list_sample_data]).to(self.device)
-        old_value = torch.stack([f.value for f in list_sample_data]).to(self.device)
-        reward_sum = torch.stack([f.reward_sum for f in list_sample_data]).to(self.device)
+        obs = torch.stack([f.obs for f in list_sample_data]).float().to(self.device)
+        legal_action = torch.stack([f.legal_action for f in list_sample_data]).float().to(self.device)
+        act = torch.stack([f.act for f in list_sample_data]).float().to(self.device).view(-1, 1)
+        old_prob = torch.stack([f.prob for f in list_sample_data]).float().to(self.device)
+        reward = torch.stack([f.reward for f in list_sample_data]).float().to(self.device)
+        advantage = torch.stack([f.advantage for f in list_sample_data]).float().to(self.device)
+        old_value = torch.stack([f.value for f in list_sample_data]).float().to(self.device)
+        reward_sum = torch.stack([f.reward_sum for f in list_sample_data]).float().to(self.device)
 
-        self.model.set_train_mode()
-        self.optimizer.zero_grad()
+        advantage = (advantage - advantage.mean()) / (advantage.std() + Config.ADV_NORM_EPS)
 
-        logits, value_pred = self.model(obs)
+        batch_size = obs.shape[0]
+        minibatch_size = min(self.minibatch_size, batch_size)
+        last_total_loss = None
+        last_info = None
 
-        total_loss, info_list = self._compute_loss(
-            logits=logits,
-            value_pred=value_pred,
-            legal_action=legal_action,
-            old_action=act,
-            old_prob=old_prob,
-            advantage=advantage,
-            old_value=old_value,
-            reward_sum=reward_sum,
-            reward=reward,
-        )
+        for _ in range(self.ppo_epoch):
+            indices = torch.randperm(batch_size, device=self.device)
+            for start in range(0, batch_size, minibatch_size):
+                end = min(start + minibatch_size, batch_size)
+                mb_idx = indices[start:end]
 
-        total_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters, Config.GRAD_CLIP_RANGE)
-        self.optimizer.step()
-        self.train_step += 1
+                self.model.set_train_mode()
+                self.optimizer.zero_grad()
+
+                logits, value_pred = self.model(obs[mb_idx])
+                total_loss, info_list = self._compute_loss(
+                    logits=logits,
+                    value_pred=value_pred,
+                    legal_action=legal_action[mb_idx],
+                    old_action=act[mb_idx],
+                    old_prob=old_prob[mb_idx],
+                    advantage=advantage[mb_idx],
+                    old_value=old_value[mb_idx],
+                    reward_sum=reward_sum[mb_idx],
+                )
+
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters, Config.GRAD_CLIP_RANGE)
+                self.optimizer.step()
+
+                last_total_loss = total_loss
+                last_info = info_list
+                self.train_step += 1
 
         now = time.time()
-        if now - self.last_report_monitor_time >= 60:
-            results = {
-                "total_loss": round(total_loss.item(), 4),
-                "value_loss": round(info_list[0].item(), 4),
-                "policy_loss": round(info_list[1].item(), 4),
-                "entropy_loss": round(info_list[2].item(), 4),
-                "reward": round(reward.mean().item(), 4),
-            }
+        if last_total_loss is not None and now - self.last_report_monitor_time >= 60:
+            with torch.no_grad():
+                approx_kl = last_info[3].item()
+                clip_frac = last_info[4].item()
+                entropy_val = last_info[2].item()
+                results = {
+                    "total_loss": round(last_total_loss.item(), 4),
+                    "value_loss": round(last_info[0].item(), 4),
+                    "policy_loss": round(last_info[1].item(), 4),
+                    "entropy_loss": round(entropy_val, 4),
+                    "reward": round(reward.mean().item(), 4),
+                    "approx_kl": round(approx_kl, 6),
+                    "clip_frac": round(clip_frac, 4),
+                }
             self.logger.info(
-                f"[train] total_loss:{results['total_loss']} "
-                f"policy_loss:{results['policy_loss']} "
-                f"value_loss:{results['value_loss']} "
-                f"entropy:{results['entropy_loss']}"
+                f"[train] total_loss:{results['total_loss']} policy_loss:{results['policy_loss']} "
+                f"value_loss:{results['value_loss']} entropy:{results['entropy_loss']} "
+                f"kl:{results['approx_kl']} clip_frac:{results['clip_frac']}"
             )
             if self.monitor:
                 self.monitor.put_data({os.getpid(): results})
@@ -107,53 +110,38 @@ class Algorithm:
         advantage,
         old_value,
         reward_sum,
-        reward,
     ):
-        """Compute standard PPO loss (policy + value + entropy).
-
-        计算标准 PPO 损失（策略损失 + 价值损失 + 熵正则化）。
-        """
-        # Masked softmax / 合法动作掩码 softmax
         prob_dist = self._masked_softmax(logits, legal_action)
-
-        # Policy loss (PPO Clip) / 策略损失
         one_hot = torch.nn.functional.one_hot(old_action[:, 0].long(), self.label_size).float()
-        new_prob = (one_hot * prob_dist).sum(1, keepdim=True)
-        old_action_prob = (one_hot * old_prob).sum(1, keepdim=True).clamp(1e-9)
+        new_prob = (one_hot * prob_dist).sum(1, keepdim=True).clamp_min(1e-8)
+        old_action_prob = (one_hot * old_prob).sum(1, keepdim=True).clamp_min(1e-8)
         ratio = new_prob / old_action_prob
         adv = advantage.view(-1, 1)
-        policy_loss1 = -ratio * adv
-        policy_loss2 = -ratio.clamp(1 - self.clip_param, 1 + self.clip_param) * adv
-        policy_loss = torch.maximum(policy_loss1, policy_loss2).mean()
 
-        # Value loss (Clipped) / 价值损失
+        surr1 = ratio * adv
+        surr2 = ratio.clamp(1 - self.clip_param, 1 + self.clip_param) * adv
+        policy_loss = -torch.min(surr1, surr2).mean()
+
         vp = value_pred
         ov = old_value
         tdret = reward_sum
         value_clip = ov + (vp - ov).clamp(-self.clip_param, self.clip_param)
-        value_loss = (
-            0.5
-            * torch.maximum(
-                torch.square(tdret - vp),
-                torch.square(tdret - value_clip),
-            ).mean()
-        )
+        value_loss = 0.5 * torch.maximum(torch.square(tdret - vp), torch.square(tdret - value_clip)).mean()
 
-        # Entropy loss / 熵损失
-        entropy_loss = (-prob_dist * torch.log(prob_dist.clamp(1e-9, 1))).sum(1).mean()
-
-        # Total loss / 总损失
+        entropy_loss = (-prob_dist * torch.log(prob_dist.clamp_min(1e-8))).sum(1).mean()
         total_loss = self.vf_coef * value_loss + policy_loss - self.var_beta * entropy_loss
 
-        return total_loss, [value_loss, policy_loss, entropy_loss]
+        with torch.no_grad():
+            log_ratio = torch.log(new_prob) - torch.log(old_action_prob)
+            approx_kl = ((ratio - 1.0) - log_ratio).mean()
+            clip_frac = ((ratio - 1.0).abs() > self.clip_param).float().mean()
+
+        return total_loss, [value_loss, policy_loss, entropy_loss, approx_kl, clip_frac]
 
     def _masked_softmax(self, logits, legal_action):
-        """Softmax with legal action masking (suppress illegal actions).
-
-        合法动作掩码下的 softmax（将非法动作概率压为极小值）。
-        """
-        label_max, _ = torch.max(logits * legal_action, dim=1, keepdim=True)
-        label = logits - label_max
-        label = label * legal_action
-        label = label + 1e5 * (legal_action - 1)
-        return torch.nn.functional.softmax(label, dim=1)
+        mask = legal_action.float()
+        valid_count = mask.sum(dim=1, keepdim=True)
+        fallback_mask = torch.ones_like(mask)
+        mask = torch.where(valid_count > 0, mask, fallback_mask)
+        masked_logits = logits.masked_fill(mask < 0.5, -1e9)
+        return torch.nn.functional.softmax(masked_logits, dim=1)
