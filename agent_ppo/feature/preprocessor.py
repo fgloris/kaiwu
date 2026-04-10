@@ -194,12 +194,14 @@ class Preprocessor:
             ]
         )
 
+        # 生存 reward
+        survive_reward = 0.01
+        
         # 怪物 dist shaping
         cur_monster_dist_norm = 1.0
         for m_feat in monster_feats:
             if m_feat[0] > 0:
                 cur_monster_dist_norm = min(cur_monster_dist_norm, m_feat[4])
-        survive_reward = 0.01
         dist_shaping = 0.1 * (cur_monster_dist_norm - self.last_min_monster_dist_norm)
 
         self.last_min_monster_dist_norm = cur_monster_dist_norm
@@ -266,10 +268,10 @@ class Preprocessor:
             1.0 * score_gain
             + survive_reward
             + 0.1 * dist_shaping
-            + 0.5 * treasure_reward
-            + 0.3 * buff_reward
             + 0.3 * flash_reward
+            + 0.5 * treasure_reward
             + 0.08 * treasure_dist_reward
+            + 0.3 * buff_reward
             + 0.04 * buff_dist_reward
         )
         reward = [reward_scalar]
