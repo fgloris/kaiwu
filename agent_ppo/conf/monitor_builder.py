@@ -103,6 +103,26 @@ def build_monitor():
         )
         .end_panel()
         .end_group()
+        .add_group(
+            group_name="奖励分解",
+            group_name_en="reward_breakdown",
+        )
+        .add_panel(
+            name="Reward Vector",
+            name_en="reward_vector",
+            type="line",
+        )
+        .add_metric(metrics_name="r_score_gain_sum", expr="avg(r_score_gain_sum{})")
+        .add_metric(metrics_name="r_monster_dist_sum", expr="avg(r_monster_dist_sum{})")
+        .add_metric(metrics_name="r_treasure_gain_sum", expr="avg(r_treasure_gain_sum{})")
+        .add_metric(metrics_name="r_treasure_dist_sum", expr="avg(r_treasure_dist_sum{})")
+        .add_metric(metrics_name="r_buff_gain_sum", expr="avg(r_buff_gain_sum{})")
+        .add_metric(metrics_name="r_buff_dist_sum", expr="avg(r_buff_dist_sum{})")
+        .add_metric(metrics_name="r_flash_sum", expr="avg(r_flash_sum{})")
+        .add_metric(metrics_name="r_wall_penalty_sum", expr="avg(r_wall_penalty_sum{})")
+        .end_panel()
+        .end_group()
+
         .build()
     )
     return config_dict

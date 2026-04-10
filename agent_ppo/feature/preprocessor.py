@@ -54,6 +54,9 @@ class Preprocessor:
         self.last_buff_dist_norm_1 = 0.0
         self.last_buff_dist_norm_2 = 0.0
 
+        self.prev_hero_pos = None
+        self.prev_map_feat = None
+
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
 
@@ -201,7 +204,14 @@ class Preprocessor:
             "monster_feats": monster_feats,
             "treasure_feats": treasures,
             "buff_feats": buffs,
+            "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
+            "prev_hero_pos": self.prev_hero_pos,
+            "prev_map_feat": None if self.prev_map_feat is None else self.prev_map_feat.copy(),
+            "last_action": int(last_action),
         }
+
+        self.prev_hero_pos = (int(hero_pos["x"]), int(hero_pos["z"]))
+        self.prev_map_feat = map_feat.copy()
 
         return vector_feat, map_feat, reward_feats, legal_action
     
@@ -218,11 +228,11 @@ class Preprocessor:
         monster_dist_reward = 0.0
         if self.last_monster_dist_norm_1 >= 0  and self.last_monster_dist_norm_2 >= 0:
             monster_dist_reward = \
-                ( reward_feats['monster_feat'][0][4] - self.last_monster_dist_norm_1) + \
-                0.2 * (reward_feats['monster_feat'][1][4] - self.last_monster_dist_norm_2)
+                ( reward_feats['monster_feats'][0][4] - self.last_monster_dist_norm_1) + \
+                0.2 * (reward_feats['monster_feats'][1][4] - self.last_monster_dist_norm_2)
             
-        self.last_monster_dist_norm_1 = reward_feats['monster_feat'][0][4]
-        self.last_monster_dist_norm_2 = reward_feats['monster_feat'][1][4]
+        self.last_monster_dist_norm_1 = reward_feats['monster_feats'][0][4]
+        self.last_monster_dist_norm_2 = reward_feats['monster_feats'][1][4]
 
         # buff和宝箱 distance shaping
         # 靠近奖励但远离不惩罚
@@ -268,7 +278,7 @@ class Preprocessor:
         self.last_buff_dist_norm_2 = buff_dist_norm_2
 
         # 宝箱收集奖励
-        cur_treasure_collected = int(env_obs["observation"]["frame_state"]["hero"].get("treasure_collected_count", 0))
+        cur_treasure_collected = int(env_obs["observation"]["frame_state"]["heroes"].get("treasure_collected_count", 0))
         treasure_gain = cur_treasure_collected - self.last_treasure_collected
         self.last_treasure_collected = cur_treasure_collected
 
@@ -289,6 +299,44 @@ class Preprocessor:
         self.last_flash_count = flash_count
 
         # 撞墙惩罚
+        wall_penalty = 0.0
+        prev_hero_pos = reward_feats.get("prev_hero_pos")
+        cur_hero_pos = reward_feats.get("hero_pos")
+        prev_map_feat = reward_feats.get("prev_map_feat")
+        last_action = reward_feats.get("last_action", -1)
+
+        if prev_hero_pos is not None and cur_hero_pos is not None and prev_map_feat is not None:
+            dx = cur_hero_pos[0] - prev_hero_pos[0]
+            dz = cur_hero_pos[1] - prev_hero_pos[1]
+            moved = (dx != 0) or (dz != 0)
+
+            # 仅对移动/闪现方向动作计算撞墙惩罚
+            action_to_dir = {
+                0: (0, 1),    # 右
+                1: (-1, 1),   # 右上
+                2: (-1, 0),   # 上
+                3: (-1, -1),  # 左上
+                4: (0, -1),   # 左
+                5: (1, -1),   # 左下
+                6: (1, 0),    # 下
+                7: (1, 1),    # 右下
+                8: (0, 1),
+                9: (-1, 1),
+                10: (-1, 0),
+                11: (-1, -1),
+                12: (0, -1),
+                13: (1, -1),
+                14: (1, 0),
+                15: (1, 1),
+            }
+            if last_action in action_to_dir and not moved:
+                dr, dc = action_to_dir[last_action]
+                center = prev_map_feat.shape[0] // 2
+                r = center + dr
+                c = center + dc
+                if 0 <= r < prev_map_feat.shape[0] and 0 <= c < prev_map_feat.shape[1]:
+                    if float(prev_map_feat[r, c]) <= 0.0:
+                        wall_penalty = -0.2
 
         # final step reward vector
 
@@ -301,7 +349,8 @@ class Preprocessor:
             0.5 * dist_shaping_norm_weight * treasure_dist_reward,
             0.1 * buff_reward,
             0.1 * dist_shaping_norm_weight * buff_dist_reward,
-            dist_shaping_norm_weight * flash_reward
+            dist_shaping_norm_weight * flash_reward,
+            wall_penalty,
         ]
 
         return reward_vector, sum(reward_vector)

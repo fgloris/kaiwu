@@ -63,7 +63,7 @@ class Agent(BaseAgent):
             legal_action=legal_action,
         )
         reward_vector, reward = self.preprocessor.calculate_reward(env_obs, reward_feature)
-        remain_info = {"reward": reward, "reward_vector": reward_vector}
+        remain_info = {"reward": [reward], "reward_vector": reward_vector}
         return obs_data, remain_info
 
     def predict(self, list_obs_data):
