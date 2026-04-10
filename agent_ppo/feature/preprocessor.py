@@ -195,14 +195,14 @@ class Preprocessor:
         )
 
         # 怪物 dist shaping
-        cur_min_dist_norm = 1.0
+        cur_monster_dist_norm = 1.0
         for m_feat in monster_feats:
             if m_feat[0] > 0:
                 cur_monster_dist_norm = min(cur_monster_dist_norm, m_feat[4])
         survive_reward = 0.01
         dist_shaping = 0.1 * (cur_monster_dist_norm - self.last_min_monster_dist_norm)
 
-        self.last_min_monster_dist_norm = cur_min_dist_norm
+        self.last_min_monster_dist_norm = cur_monster_dist_norm
 
         # buff和宝箱 distance shaping
         cur_nearest_treasure_dist_norm = 1.0
