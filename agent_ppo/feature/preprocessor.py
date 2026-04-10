@@ -72,7 +72,7 @@ class Preprocessor:
 
         hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
 
-        # Monster features (5D x 2) / 怪物特征
+        # 怪物特征
         monsters = frame_state.get("monsters", [])
         monster_feats = []
         for i in range(2):
@@ -103,7 +103,7 @@ class Preprocessor:
             else:
                 monster_feats.append(np.zeros(6, dtype=np.float32))
 
-        # Organ features
+        # buff和宝箱特征
         organs = frame_state.get("organs", [])
 
         treasure_feat = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
@@ -151,7 +151,7 @@ class Preprocessor:
                 dtype=np.float32,
             )
 
-        # Local map features (16D) / 局部地图特征
+        # 局部地图特征 (16D)
         map_feat = np.zeros(16, dtype=np.float32)
         if map_info is not None and len(map_info) >= 13:
             center = len(map_info) // 2
@@ -162,7 +162,7 @@ class Preprocessor:
                         map_feat[flat_idx] = float(map_info[row][col] != 0)
                     flat_idx += 1
 
-        # Legal action mask (8D) / 合法动作掩码
+        # 合法动作掩码 (8D)
         legal_action = [1] * 16
         if isinstance(legal_act_raw, list) and legal_act_raw:
             if isinstance(legal_act_raw[0], bool):
@@ -175,17 +175,36 @@ class Preprocessor:
         if sum(legal_action) == 0:
             legal_action = [1] * 16
 
-        # Progress features (2D) / 进度特征
-        cur_min_dist_norm = 1.0
-        for m_feat in monster_feats:
-            if m_feat[0] > 0:
-                cur_min_dist_norm = min(cur_min_dist_norm, m_feat[4])
-
+        # 进度特征
         step_norm = _norm(self.step_no, self.max_step)
         progress_treasure_collect = _norm(int(hero.get("treasure_collected_count", 0)), 10)
         progress_feat = np.array([step_norm, progress_treasure_collect], dtype=np.float32)
 
-        # Nearest treasure / buff distance shaping
+        # Concatenate features / 拼接特征
+        feature = np.concatenate(
+            [
+                hero_feat,
+                monster_feats[0],
+                monster_feats[1],
+                treasure_feat,
+                buff_feat,
+                map_feat,
+                np.array(legal_action, dtype=np.float32),
+                progress_feat,
+            ]
+        )
+
+        # 怪物 dist shaping
+        cur_min_dist_norm = 1.0
+        for m_feat in monster_feats:
+            if m_feat[0] > 0:
+                cur_monster_dist_norm = min(cur_monster_dist_norm, m_feat[4])
+        survive_reward = 0.01
+        dist_shaping = 0.1 * (cur_monster_dist_norm - self.last_min_monster_dist_norm)
+
+        self.last_min_monster_dist_norm = cur_min_dist_norm
+
+        # buff和宝箱 distance shaping
         cur_nearest_treasure_dist_norm = 1.0
         if len(treasures) > 0:
             cur_nearest_treasure_dist_norm = _norm(
@@ -206,7 +225,6 @@ class Preprocessor:
         treasure_dist_reward = 0.0
         buff_dist_reward = 0.0
 
-        # 只有在目标还存在时才做距离塑形
         if len(treasures) > 0:
             treasure_dist_reward = treasure_dist_delta
 
@@ -216,47 +234,27 @@ class Preprocessor:
         self.last_nearest_treasure_dist_norm = cur_nearest_treasure_dist_norm
         self.last_nearest_buff_dist_norm = cur_nearest_buff_dist_norm
 
-        # Concatenate features / 拼接特征
-        feature = np.concatenate(
-            [
-                hero_feat,
-                monster_feats[0],
-                monster_feats[1],
-                treasure_feat,
-                buff_feat,
-                map_feat,
-                np.array(legal_action, dtype=np.float32),
-                progress_feat,
-            ]
-        )
-
-        # Step reward / 即时奖励
-        survive_reward = 0.01
-        dist_shaping = 0.1 * (cur_min_dist_norm - self.last_min_monster_dist_norm)
-
-        self.last_min_monster_dist_norm = cur_min_dist_norm
-
-        # score-based reward / 基于比赛分数增量的奖励
+        # 基于比赛分数增量的奖励
         env_info = env_obs["observation"].get("env_info", {})
         cur_total_score = float(env_info.get("total_score", 0.0))
         score_gain = cur_total_score - self.last_total_score
         self.last_total_score = cur_total_score
 
-        # 3) 宝箱收集奖励
+        # 宝箱收集奖励
         cur_treasure_collected = int(hero.get("treasure_collected_count", 0))
         treasure_gain = cur_treasure_collected - self.last_treasure_collected
         self.last_treasure_collected = cur_treasure_collected
 
         treasure_reward = max(0, treasure_gain)
 
-        # 4) buff收集奖励
+        # buff收集奖励
         cur_collected_buff = int(env_info.get("collected_buff", 0))
         buff_gain = cur_collected_buff - self.last_collected_buff
         self.last_collected_buff = cur_collected_buff
 
         buff_reward = max(0, buff_gain)
 
-        # 5) 闪现释放奖励
+        # 闪现释放奖励
         flash_count = env_info.get("flash_count", 0)
         flash_gain = flash_count - self.last_flash_count
         self.last_flash_count = flash_count

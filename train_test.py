@@ -21,9 +21,9 @@ if __name__ == "__main__":
         algorithm_name=algorithm_name,
         algorithm_name_list=algorithm_name_list,
         env_vars={
-            "replay_buffer_capacity": "256",
+            "replay_buffer_capacity": "512",
             "preload_ratio": "0.5",
-            "train_batch_size": "64",
+            "train_batch_size": "128",
             "dump_model_freq": "10",
         },
     )
