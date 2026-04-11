@@ -241,7 +241,7 @@ class Preprocessor:
         step_norm = _norm(self.step_no, self.max_step)
         progress_treasure_collect = _norm(int(hero.get("treasure_collected_count", 0)), 10)
         time_before_second_mounster = _norm(max(0, env_info.get("monster_interval", 300) - self.step_no), self.max_step)
-        has_monster_speedup = 0.0 if env_info.get("monster_speed", 300) <= 1 else 1.0
+        has_monster_speedup = 0.0 if env_info.get("monster_speed", 0) <= 1 else 1.0
         progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, has_monster_speedup], dtype=np.float32)
 
         # Concatenate features / 拼接特征
@@ -264,6 +264,7 @@ class Preprocessor:
             "treasure_feats_available": len(treasures),
             "buff_feats": buff_feat,
             "buff_feats_available": len(buffs),
+            "progress_feats": progress_feat,
             "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
             "prev_hero_pos": self.prev_hero_pos,
             "last_action": int(last_action),
@@ -356,15 +357,28 @@ class Preprocessor:
             if not moved:
                 wall_penalty = -0.2
 
-        # final step reward vector
+        if reward_feats["progress_feats"][2] > 0: # time before second monseter
+            # 早期：鼓励探索和拿宝箱
+            treasure_phase_weight = 1.20
+            survive_phase_weight = 0.85
+        elif reward_feats["progress_feats"][3] == 0: # has monster speedup
+            # 中期：逐步平衡
+            treasure_phase_weight = 1.00
+            survive_phase_weight = 1.00
+        else:
+            # 后期：怪物加速后，生存优先
+            treasure_phase_weight = 0.75
+            survive_phase_weight = 1.50
 
+        # final step reward vector
         dist_shaping_norm_weight = 12.8
 
         reward_vector = [
             0.30 * score_gain,
+            survive_phase_weight * 0.01,
             0.35 * dist_shaping_norm_weight * monster_dist_reward,
-            0.50 * treasure_reward,
-            0.35 * dist_shaping_norm_weight * treasure_dist_reward,
+            0.50 * treasure_phase_weight * treasure_reward,
+            0.35 * treasure_phase_weight * dist_shaping_norm_weight * treasure_dist_reward,
             0.20 * buff_reward,
             0.05 * dist_shaping_norm_weight * buff_dist_reward,
             0.25 * flash_reward,
