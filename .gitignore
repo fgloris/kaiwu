@@ -1,3 +1,4 @@
 .vscode
 ckpt
 __pycache__
+*.zip
