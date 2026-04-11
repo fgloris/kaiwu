@@ -11,7 +11,7 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 """
 
 import numpy as np
-from topo_tools import *
+from agent_ppo.feature.topo_tools import *
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
@@ -34,7 +34,7 @@ THIN_MARGIN = 3
 THIN_MAX_ITER = 8
 
 # 拓扑距离归一化
-MAX_TOPO_DIST = 800
+MAX_TOPO_DIST = 1000
 
 # 角度转向量特征
 DIR8_TO_VEC = {
@@ -578,7 +578,7 @@ class Preprocessor:
         reward_vector = [
             1.00 * score_gain,
             survive_phase_weight * 0.02,
-            0.50 * dist_shaping_norm_weight * monster_dist_reward,
+            0.08 * monster_dist_reward,
             5.00 * treasure_phase_weight * treasure_reward,
             0.25 * treasure_phase_weight * dist_shaping_norm_weight * treasure_dist_reward,
             0.35 * buff_reward,
