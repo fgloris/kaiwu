@@ -79,7 +79,7 @@ class EpisodeRunner:
         while True:
             # Periodically fetch training metrics / 定期获取训练指标
             now = time.time()
-            if now - self.last_get_training_metrics_time >= 60:
+            if now - self.last_get_training_metrics_time >= 20:
                 training_metrics = get_training_metrics()
                 self.last_get_training_metrics_time = now
                 if training_metrics is not None:
@@ -159,7 +159,7 @@ class EpisodeRunner:
                         final_reward[0] = -10.0
                         result_str = "FAIL"
                     else:
-                        final_reward[0] = 10.0 # 0.01 * total_score
+                        final_reward[0] = 10.0 + 0.01 * total_score
                         result_str = "WIN"
 
                     self.logger.info(
@@ -191,11 +191,19 @@ class EpisodeRunner:
 
                     # Monitor report / 监控上报
                     now = time.time()
-                    if now - self.last_report_monitor_time >= 60 and self.monitor:
+                    train_total_score = float(env_info.get("total_score", 0.0))
+                    train_treasure_score = float(env_info.get("treasure_score", 0.0))
+                    train_step_score = float(env_info.get("step_score", 0.0))
+
+                    if now - self.last_report_monitor_time >= 20 and self.monitor:
                         monitor_data = {
                             "reward": round(total_reward + float(final_reward[0]), 4),
                             "episode_steps": step,
                             "episode_cnt": self.episode_cnt,
+
+                            "train_total_score": round(train_total_score, 4),
+                            "train_treasure_score": round(train_treasure_score, 4),
+                            "train_step_score": round(train_step_score, 4),
                         }
                         for i, key in enumerate(reward_vec_keys):
                             monitor_data[key] = round(float(episode_reward_vec_sum[i]), 4)

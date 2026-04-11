@@ -81,7 +81,7 @@ class Algorithm:
         self.train_step += 1
 
         now = time.time()
-        if now - self.last_report_monitor_time >= 60:
+        if now - self.last_report_monitor_time >= 20:
             results = {
                 "total_loss": round(total_loss.item(), 4),
                 "value_loss": round(info_list[0].item(), 4),

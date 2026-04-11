@@ -94,8 +94,6 @@ class Preprocessor:
         # 怪物特征
         monsters = frame_state.get("monsters", [])
         monster_feats = []
-        monsters = frame_state.get("monsters", [])
-        monster_feats = []
 
         for i in range(2):
             if i < len(monsters):
@@ -138,7 +136,7 @@ class Preprocessor:
                     )
                 )
             else:
-                monster_feats.append(np.zeros(7, dtype=np.float32))
+                monster_feats.append(np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32))
 
         # buff和宝箱特征
         organs = frame_state.get("organs", [])
@@ -259,8 +257,11 @@ class Preprocessor:
 
         reward_feats = {
             "monster_feats": monster_feats,
-            "treasure_feats": treasures,
-            "buff_feats": buffs,
+            "monster_feats_available": len(monsters),
+            "treasure_feats": treasure_feat,
+            "treasure_feats_available": len(treasures),
+            "buff_feats": buff_feat,
+            "buff_feats_available": len(buffs),
             "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
             "prev_hero_pos": self.prev_hero_pos,
             "last_action": int(last_action),
@@ -294,11 +295,11 @@ class Preprocessor:
 
         treasure_dist_norm_1 = 0.0
         treasure_dist_norm_2 = 0.0
-        if len(reward_feats['treasure_feats']) > 0: 
-            treasure_dist_norm_1 = _norm(reward_feats['treasure_feats'][0].get("raw_dist", MAP_SIZE * 1.41), MAP_SIZE * 1.41)
+        if reward_feats['treasure_feats_available'] > 0: 
+            treasure_dist_norm_1 = reward_feats['treasure_feats'][2]
             
-        if len(reward_feats['treasure_feats']) > 1:
-            treasure_dist_norm_2 = _norm(reward_feats['treasure_feats'][0].get("raw_dist", MAP_SIZE * 1.41), MAP_SIZE * 1.41)
+        if reward_feats['treasure_feats_available'] > 1:
+            treasure_dist_norm_2 = reward_feats['treasure_feats'][7]
 
         treasure_dist_reward = max(0.0, (self.last_treasure_dist_norm_1 - treasure_dist_norm_1) + 
                             0.2 * (self.last_treasure_dist_norm_2 - treasure_dist_norm_2))
@@ -308,11 +309,11 @@ class Preprocessor:
 
         buff_dist_norm_1 = 0.0
         buff_dist_norm_2 = 0.0
-        if len(reward_feats['buff_feats']) > 0: 
-            buff_dist_norm_1 = _norm(reward_feats['buff_feats'][0].get("raw_dist", MAP_SIZE * 1.41), MAP_SIZE * 1.41)
+        if reward_feats['buff_feats_available'] > 0: 
+            buff_dist_norm_1 = reward_feats['buff_feats'][2]
             
-        if len(reward_feats['buff_feats']) > 1:
-            buff_dist_norm_2 = _norm(reward_feats['buff_feats'][0].get("raw_dist", MAP_SIZE * 1.41), MAP_SIZE * 1.41)
+        if reward_feats['buff_feats_available'] > 1:
+            buff_dist_norm_2 = reward_feats['buff_feats'][7]
 
         buff_dist_reward = max(0.0, (self.last_buff_dist_norm_1 - buff_dist_norm_1) + 
                         0.2 * (self.last_buff_dist_norm_2 - buff_dist_norm_2))
@@ -338,7 +339,7 @@ class Preprocessor:
         flash_reward = 0.0
         flash_count = env_info.get("flash_count", 0)
         if (flash_count - self.last_flash_count) > 0:
-            flash_reward = 0.8 * monster_dist_reward + 0.5 * treasure_dist_reward + 0.1 * buff_dist_reward
+            flash_reward = 0.5 * monster_dist_reward + 0.5 * treasure_dist_reward + 0.1 * buff_dist_reward
         self.last_flash_count = flash_count
 
         # 撞墙惩罚
@@ -360,7 +361,7 @@ class Preprocessor:
         reward_vector = [
             0.30 * score_gain,
             0.35 * dist_shaping_norm_weight * monster_dist_reward,
-            #0.20 * treasure_reward,
+            0.50 * treasure_reward,
             0.35 * dist_shaping_norm_weight * treasure_dist_reward,
             0.20 * buff_reward,
             0.05 * dist_shaping_norm_weight * buff_dist_reward,
