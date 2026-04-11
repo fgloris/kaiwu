@@ -23,6 +23,17 @@ MAX_FLASH_CD = 2000.0
 # Max buff duration / buff最大持续时间
 MAX_BUFF_DURATION = 50.0
 
+# 角度转向量特征
+DIR8_TO_VEC = {
+    0: (1.0, 0.0),
+    1: (1/np.sqrt(2), -1/np.sqrt(2)),
+    2: (0.0, -1.0),
+    3: (-1/np.sqrt(2), -1/np.sqrt(2)),
+    4: (-1.0, 0.0),
+    5: (-1/np.sqrt(2), 1/np.sqrt(2)),
+    6: (0.0, 1.0),
+    7: (1/np.sqrt(2), 1/np.sqrt(2)),
+}
 
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
@@ -83,42 +94,58 @@ class Preprocessor:
         # 怪物特征
         monsters = frame_state.get("monsters", [])
         monster_feats = []
+        monsters = frame_state.get("monsters", [])
+        monster_feats = []
+
         for i in range(2):
             if i < len(monsters):
                 m = monsters[i]
-                # 当 is_in_view = 0 时，仅有 hero_relative_direction 有效
-                # {'hero_l2_distance': 0, 'hero_relative_direction': 2, 'monster_id': 14, 'monster_interval': 300, 'pos': {'x': 105, 'z': 56}, 'speed': 1, 'is_in_view': 1}
+
+                # 视野外时，hero_relative_direction 和 hero_l2_distance 仍然可用
                 is_in_view = float(m.get("is_in_view", 0))
-                m_pos = m["pos"]
-                dir_norm = _norm(m.get("hero_relative_direction", 0), 8.0)
+                m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED) if is_in_view else 0.0
+
+                rel_x = 0.0
+                rel_z = 0.0
+
+                # 先给默认值：视野外时只保留粗信息
+                dir_idx = int(m.get("hero_relative_direction", 0)) % 8
+                dir_x, dir_z = DIR8_TO_VEC[dir_idx]
+
+                dist_norm = _norm(m.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET)
 
                 if is_in_view:
-                    m_x_norm = _norm(m_pos["x"], MAP_SIZE)
-                    m_z_norm = _norm(m_pos["z"], MAP_SIZE)
-                    m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED)
-                    # Euclidean distance / 欧式距离
-                    raw_dist = np.sqrt((hero_pos["x"] - m_pos["x"]) ** 2 + (hero_pos["z"] - m_pos["z"]) ** 2)
+                    m_pos = m["pos"]
+                    dx = float(m_pos["x"] - hero_pos["x"])
+                    dz = float(m_pos["z"] - hero_pos["z"])
+
+                    # 精细相对位置：保留正负号
+                    rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
+                    rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
+
+                    raw_dist = np.sqrt(dx * dx + dz * dz)
                     dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
-                else:
-                    m_x_norm = 0.0
-                    m_z_norm = 0.0
-                    m_speed_norm = 0.0
-                    dist_norm = 1.0
-                    
+
+                    # 视野内时，用连续方向覆盖离散方向
+                    if raw_dist > 1e-6:
+                        dir_x = dx / raw_dist
+                        dir_z = dz / raw_dist
+
                 monster_feats.append(
-                    np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm, dir_norm], dtype=np.float32)
+                    np.array(
+                        [is_in_view, m_speed_norm, rel_x, rel_z, dist_norm, dir_x, dir_z],
+                        dtype=np.float32,
+                    )
                 )
             else:
-                monster_feats.append(np.zeros(6, dtype=np.float32))
+                monster_feats.append(np.zeros(7, dtype=np.float32))
 
         # buff和宝箱特征
         organs = frame_state.get("organs", [])
 
-        treasure_feat = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
-        buff_feat = np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32)
-
-        treasure_feat = np.zeros(8, dtype=np.float32)  # 前2个宝箱：每个4维
-        buff_feat = np.zeros(8, dtype=np.float32)      # 前2个buff：每个4维
+        # 前2个宝箱 / buff：每个5维 [rel_x, rel_z, dist_norm, dir_x, dir_z]
+        treasure_feat = np.zeros(10, dtype=np.float32)
+        buff_feat = np.zeros(10, dtype=np.float32)
 
         treasures = []
         buffs = []
@@ -126,41 +153,67 @@ class Preprocessor:
         for organ in organs:
             if organ.get("status", 0) != 1:
                 continue
+
             sub_type = organ.get("sub_type", 0)
-            raw_dist = np.sqrt(
-                (hero_pos["x"] - organ["pos"]["x"]) ** 2 +
-                (hero_pos["z"] - organ["pos"]["z"]) ** 2
-            )
+            organ_pos = organ["pos"]
+
+            dx = float(organ_pos["x"] - hero_pos["x"])
+            dz = float(organ_pos["z"] - hero_pos["z"])
+            raw_dist = np.sqrt(dx * dx + dz * dz)
+
+            # 存起来，方便排序和后续直接用
             organ["raw_dist"] = raw_dist
+            organ["_dx"] = dx
+            organ["_dz"] = dz
+
             if sub_type == 1:
                 treasures.append(organ)
             elif sub_type == 2:
                 buffs.append(organ)
 
-        treasures.sort(key=lambda x: x.get("raw_dist", 1.0))
-        buffs.sort(key=lambda x: x.get("raw_dist", 1.0))
+        treasures.sort(key=lambda x: x.get("raw_dist", 1e9))
+        buffs.sort(key=lambda x: x.get("raw_dist", 1e9))
 
         for i, organ in enumerate(treasures[:2]):
-            organ_pos = organ["pos"]
-            treasure_feat[i * 4 : i * 4 + 4] = np.array(
-                [
-                    _norm(organ_pos["x"], MAP_SIZE),
-                    _norm(organ_pos["z"], MAP_SIZE),
-                    _norm(organ.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
-                    _norm(organ.get("hero_relative_direction", 0), 8.0),
-                ],
+            dx = organ["_dx"]
+            dz = organ["_dz"]
+            raw_dist = organ.get("raw_dist", MAP_SIZE * 1.41)
+
+            rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
+            rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
+            dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
+
+            # 优先用连续方向；太近时退化到离散方向
+            if raw_dist > 1e-6:
+                dir_x = dx / raw_dist
+                dir_z = dz / raw_dist
+            else:
+                dir_idx = int(organ.get("hero_relative_direction", 0)) % 8
+                dir_x, dir_z = DIR8_TO_VEC[dir_idx]
+
+            treasure_feat[i * 5 : i * 5 + 5] = np.array(
+                [rel_x, rel_z, dist_norm, dir_x, dir_z],
                 dtype=np.float32,
             )
 
         for i, organ in enumerate(buffs[:2]):
-            organ_pos = organ["pos"]
-            buff_feat[i * 4 : i * 4 + 4] = np.array(
-                [
-                    _norm(organ_pos["x"], MAP_SIZE),
-                    _norm(organ_pos["z"], MAP_SIZE),
-                    _norm(organ.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET),
-                    _norm(organ.get("hero_relative_direction", 0), 8.0),
-                ],
+            dx = organ["_dx"]
+            dz = organ["_dz"]
+            raw_dist = organ.get("raw_dist", MAP_SIZE * 1.41)
+
+            rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
+            rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
+            dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
+
+            if raw_dist > 1e-6:
+                dir_x = dx / raw_dist
+                dir_z = dz / raw_dist
+            else:
+                dir_idx = int(organ.get("hero_relative_direction", 0)) % 8
+                dir_x, dir_z = DIR8_TO_VEC[dir_idx]
+
+            buff_feat[i * 5 : i * 5 + 5] = np.array(
+                [rel_x, rel_z, dist_norm, dir_x, dir_z],
                 dtype=np.float32,
             )
 
@@ -307,9 +360,9 @@ class Preprocessor:
         reward_vector = [
             0.30 * score_gain,
             0.35 * dist_shaping_norm_weight * monster_dist_reward,
-            0.20 * treasure_reward,
+            #0.20 * treasure_reward,
             0.35 * dist_shaping_norm_weight * treasure_dist_reward,
-            0.05 * buff_reward,
+            0.20 * buff_reward,
             0.05 * dist_shaping_norm_weight * buff_dist_reward,
             0.25 * flash_reward,
             1.00 * wall_penalty,
