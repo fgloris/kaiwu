@@ -377,11 +377,11 @@ class Preprocessor:
 
         reward_vector = [
             0.30 * score_gain,
-            survive_phase_weight * 0.01,
+            survive_phase_weight * 0.02,
             0.35 * dist_shaping_norm_weight * monster_dist_reward,
-            0.50 * treasure_phase_weight * treasure_reward,
-            0.35 * treasure_phase_weight * dist_shaping_norm_weight * treasure_dist_reward,
-            0.20 * buff_reward,
+            5.00 * treasure_phase_weight * treasure_reward,
+            0.25 * treasure_phase_weight * dist_shaping_norm_weight * treasure_dist_reward,
+            0.35 * buff_reward,
             0.05 * dist_shaping_norm_weight * buff_dist_reward,
             0.25 * flash_reward,
             1.00 * wall_penalty,
