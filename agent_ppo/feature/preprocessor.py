@@ -333,8 +333,8 @@ class Preprocessor:
 
         for i in range(h):
             for j in range(w):
-                gx = x0 + i
-                gy = y0 + j
+                gx = x0 + j
+                gy = y0 + i
                 if not (0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT):
                     continue
 
@@ -445,6 +445,11 @@ class Preprocessor:
         x1, y1 = int(p1[0]), int(p1[1])
         x2, y2 = int(p2[0]), int(p2[1])
 
+        assert self.visibility_map[x1, y1] == 1, "x1,y1 not visible!"
+        assert self.visibility_map[x2, y2] == 1, "x2,y2 not visible!"
+        assert self.passable_map[x1, y1] == 1, "x1,y1 not passable!"
+        assert self.passable_map[x2, y2] == 1, "x2,y2 not passable!"
+
         sx, sy = int(self.proj_x[x1, y1]), int(self.proj_y[x1, y1])
         tx, ty = int(self.proj_x[x2, y2]), int(self.proj_y[x2, y2])
 
@@ -504,6 +509,7 @@ class Preprocessor:
                 dir_x, dir_z = DIR8_TO_VEC[dir_idx]
 
                 dist_norm = _norm(m.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET)
+                topo_dist_norm = MAX_TOPO_DIST
 
                 if is_in_view:
                     m_pos = m["pos"]
@@ -516,6 +522,8 @@ class Preprocessor:
 
                     raw_dist = np.sqrt(dx * dx + dz * dz)
                     dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
+
+                    # 拓扑距离计算
                     topo_dist = self.topo_distance((m_pos["x"], m_pos["z"]), (hero_pos["x"], hero_pos["z"]))
                     assert topo_dist is not None, "topo_dist is None in monster!"
                     topo_dist_norm = _norm(topo_dist, MAX_TOPO_DIST)
@@ -688,11 +696,11 @@ class Preprocessor:
         monster_dist_reward = 0.0
         if self.last_monster_dist_norm_1 >= 0  and self.last_monster_dist_norm_2 >= 0:
             monster_dist_reward = \
-                ( reward_feats['monster_feats'][0][4] - self.last_monster_dist_norm_1) + \
-                0.2 * (reward_feats['monster_feats'][1][4] - self.last_monster_dist_norm_2)
+                ( reward_feats['monster_feats'][0][5] - self.last_monster_dist_norm_1) + \
+                0.2 * (reward_feats['monster_feats'][1][5] - self.last_monster_dist_norm_2)
             
-        self.last_monster_dist_norm_1 = reward_feats['monster_feats'][0][4]
-        self.last_monster_dist_norm_2 = reward_feats['monster_feats'][1][4]
+        self.last_monster_dist_norm_1 = reward_feats['monster_feats'][0][5]
+        self.last_monster_dist_norm_2 = reward_feats['monster_feats'][1][5]
 
         # buff和宝箱 distance shaping
         # 靠近奖励但远离不惩罚
@@ -769,7 +777,7 @@ class Preprocessor:
         else:
             # 后期：怪物加速后，生存优先
             treasure_phase_weight = 0.75
-            survive_phase_weight = 1.50
+            survive_phase_weight = 2.00
 
         # final step reward vector
         dist_shaping_norm_weight = 12.8
@@ -777,7 +785,7 @@ class Preprocessor:
         reward_vector = [
             0.30 * score_gain,
             survive_phase_weight * 0.02,
-            0.35 * dist_shaping_norm_weight * monster_dist_reward,
+            0.50 * dist_shaping_norm_weight * monster_dist_reward,
             5.00 * treasure_phase_weight * treasure_reward,
             0.25 * treasure_phase_weight * dist_shaping_norm_weight * treasure_dist_reward,
             0.35 * buff_reward,
