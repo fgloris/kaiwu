@@ -16,12 +16,7 @@ from agent_ppo.conf.conf import Config
 
 
 # ObsData: feature=40D vector, legal_action=8D mask / 特征向量与合法动作掩码
-ObsData = create_cls(
-    "ObsData",
-    vector_feature=None,
-    map_feature=None,
-    legal_action=None,
-)
+ObsData = create_cls("ObsData", feature=None, legal_action=None)
 
 # ActData: action, d_action(greedy), prob, value / 动作、贪心动作、概率、价值
 ActData = create_cls("ActData", action=None, d_action=None, prob=None, value=None)
@@ -29,8 +24,7 @@ ActData = create_cls("ActData", action=None, d_action=None, prob=None, value=Non
 # SampleData: single-frame sample with int dims / 单帧样本（整数表示维度）
 SampleData = create_cls(
     "SampleData",
-    vector_obs=Config.VECTOR_FEATURE_LEN,
-    map_obs=Config.MAP_CHANNEL * Config.MAP_SIZE * Config.MAP_SIZE, # map_obs 先按 flatten 长度存，进模型前再 reshape 成 [B,1,21,21]
+    obs=Config.DIM_OF_OBSERVATION,
     legal_action=Config.ACTION_NUM,
     act=1,
     reward=Config.VALUE_NUM,

@@ -78,52 +78,6 @@ def build_monitor():
         )
         .end_panel()
         .end_group()
-
-        # 新增：环境测试指标
-        .add_group(
-            group_name="环境指标",
-            group_name_en="env",
-        )
-        .add_panel(
-            name="测试环境得分",
-            name_en="eval_env_scores",
-            type="line",
-        )
-        .add_metric(
-            metrics_name="eval_total_score",
-            expr="avg(eval_total_score{})",
-        )
-        .add_metric(
-            metrics_name="eval_treasure_score",
-            expr="avg(eval_treasure_score{})",
-        )
-        .add_metric(
-            metrics_name="eval_step_score",
-            expr="avg(eval_step_score{})",
-        )
-        .end_panel()
-        .end_group()
-        .add_group(
-            group_name="奖励分解",
-            group_name_en="reward_breakdown",
-        )
-        .add_panel(
-            name="Reward Vector",
-            name_en="reward_vector",
-            type="line",
-        )
-        .add_metric(metrics_name="r_score_gain_sum", expr="avg(r_score_gain_sum{})")
-        .add_metric(metrics_name="r_survival_gain_sum", expr="avg(r_survival_gain_sum{})")
-        .add_metric(metrics_name="r_monster_dist_sum", expr="avg(r_monster_dist_sum{})")
-        .add_metric(metrics_name="r_treasure_gain_sum", expr="avg(r_treasure_gain_sum{})")
-        .add_metric(metrics_name="r_treasure_dist_sum", expr="avg(r_treasure_dist_sum{})")
-        .add_metric(metrics_name="r_buff_gain_sum", expr="avg(r_buff_gain_sum{})")
-        .add_metric(metrics_name="r_buff_dist_sum", expr="avg(r_buff_dist_sum{})")
-        .add_metric(metrics_name="r_flash_sum", expr="avg(r_flash_sum{})")
-        .add_metric(metrics_name="r_wall_penalty_sum", expr="avg(r_wall_penalty_sum{})")
-        .end_panel()
-        .end_group()
-
         .build()
     )
     return config_dict
