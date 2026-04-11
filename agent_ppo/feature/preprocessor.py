@@ -10,10 +10,15 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 峡谷追猎 PPO 特征预处理与奖励设计。
 """
 
+from collections import deque
 import numpy as np
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
+MAP_SIZE_INT = 128
+LOCAL_MAP_SIZE = 21
+LOCAL_MAP_HALF = 10
+
 # Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 5.0
 # Max distance bucket / 距离桶最大值
@@ -23,17 +28,23 @@ MAX_FLASH_CD = 2000.0
 # Max buff duration / buff最大持续时间
 MAX_BUFF_DURATION = 50.0
 
+# 局部细化时，给视野窗口额外扩一个边，减轻边界伪影
+THIN_MARGIN = 3
+# thinning 最大迭代次数；不宜太大，避免每步开销上升
+THIN_MAX_ITER = 8
+
 # 角度转向量特征
 DIR8_TO_VEC = {
     0: (1.0, 0.0),
-    1: (1/np.sqrt(2), -1/np.sqrt(2)),
+    1: (1 / np.sqrt(2), -1 / np.sqrt(2)),
     2: (0.0, -1.0),
-    3: (-1/np.sqrt(2), -1/np.sqrt(2)),
+    3: (-1 / np.sqrt(2), -1 / np.sqrt(2)),
     4: (-1.0, 0.0),
-    5: (-1/np.sqrt(2), 1/np.sqrt(2)),
+    5: (-1 / np.sqrt(2), 1 / np.sqrt(2)),
     6: (0.0, 1.0),
-    7: (1/np.sqrt(2), 1/np.sqrt(2)),
+    7: (1 / np.sqrt(2), 1 / np.sqrt(2)),
 }
+
 
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
@@ -42,6 +53,221 @@ def _norm(v, v_max, v_min=0.0):
     """
     v = float(np.clip(v, v_min, v_max))
     return (v - v_min) / (v_max - v_min) if (v_max - v_min) > 1e-6 else 0.0
+
+
+def _clip_window(x0, x1, y0, y1, size=MAP_SIZE_INT):
+    x0 = max(0, x0)
+    y0 = max(0, y0)
+    x1 = min(size, x1)
+    y1 = min(size, y1)
+    return x0, x1, y0, y1
+
+
+def _neighbors(x, y, img01):
+    # P2, P3, ..., P9
+    return [
+        img01[x - 1, y],     # P2
+        img01[x - 1, y + 1], # P3
+        img01[x,     y + 1], # P4
+        img01[x + 1, y + 1], # P5
+        img01[x + 1, y],     # P6
+        img01[x + 1, y - 1], # P7
+        img01[x,     y - 1], # P8
+        img01[x - 1, y - 1], # P9
+    ]
+
+
+def _transitions(neigh):
+    seq = neigh + [neigh[0]]
+    return sum((seq[i] == 0 and seq[i + 1] == 1) for i in range(8))
+
+
+def zhang_suen_thinning(binary01, max_iter=None):
+    """
+    输入: 0/1 二值图
+    输出: 0/1 二值图
+    作用: 在尽量保持连通性的前提下，对亮区域做“拓扑保持削薄”
+    """
+    img = (binary01 > 0).astype(np.uint8).copy()
+    h, w = img.shape
+
+    if h < 3 or w < 3:
+        return img
+
+    changed = True
+    it = 0
+
+    while changed:
+        changed = False
+        to_delete = []
+
+        # step 1
+        for x in range(1, h - 1):
+            for y in range(1, w - 1):
+                if img[x, y] != 1:
+                    continue
+                n = _neighbors(x, y, img)
+                s = sum(n)
+                t = _transitions(n)
+                if (
+                    2 <= s <= 6 and
+                    t == 1 and
+                    n[0] * n[2] * n[4] == 0 and
+                    n[2] * n[4] * n[6] == 0
+                ):
+                    to_delete.append((x, y))
+
+        if to_delete:
+            changed = True
+            for x, y in to_delete:
+                img[x, y] = 0
+
+        to_delete = []
+
+        # step 2
+        for x in range(1, h - 1):
+            for y in range(1, w - 1):
+                if img[x, y] != 1:
+                    continue
+                n = _neighbors(x, y, img)
+                s = sum(n)
+                t = _transitions(n)
+                if (
+                    2 <= s <= 6 and
+                    t == 1 and
+                    n[0] * n[2] * n[6] == 0 and
+                    n[0] * n[4] * n[6] == 0
+                ):
+                    to_delete.append((x, y))
+
+        if to_delete:
+            changed = True
+            for x, y in to_delete:
+                img[x, y] = 0
+
+        it += 1
+        if max_iter is not None and it >= max_iter:
+            break
+
+    return img
+
+
+def uf_find(parent, x):
+    while parent[x] != x:
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+    return x
+
+
+def uf_union(parent, size, a, b):
+    ra = uf_find(parent, a)
+    rb = uf_find(parent, b)
+    if ra == rb:
+        return
+    if size[ra] < size[rb]:
+        ra, rb = rb, ra
+    parent[rb] = ra
+    size[ra] += size[rb]
+
+
+def build_largest_connected_component(thin_01):
+    """
+    在 thin_01 上做 8 邻接连通分量，只保留最大连通分量。
+    输入: 0/1
+    输出: 0/1
+    """
+    h, w = thin_01.shape
+    n = h * w
+
+    parent = np.arange(n, dtype=np.int32)
+    size = np.ones(n, dtype=np.int32)
+
+    def idx(r, c):
+        return r * w + c
+
+    # 只看已扫描过的邻居，避免重复 union
+    prev_neighbors = [(-1, -1), (-1, 0), (-1, 1), (0, -1)]
+
+    for r in range(h):
+        for c in range(w):
+            if thin_01[r, c] == 0:
+                continue
+            cur = idx(r, c)
+            for dr, dc in prev_neighbors:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < h and 0 <= nc < w and thin_01[nr, nc] == 1:
+                    uf_union(parent, size, cur, idx(nr, nc))
+
+    comp_count = {}
+    for r in range(h):
+        for c in range(w):
+            if thin_01[r, c] == 0:
+                continue
+            root = uf_find(parent, idx(r, c))
+            comp_count[root] = comp_count.get(root, 0) + 1
+
+    largest_cc_mask = np.zeros_like(thin_01, dtype=np.uint8)
+    if len(comp_count) == 0:
+        return largest_cc_mask
+
+    largest_root = max(comp_count, key=comp_count.get)
+
+    for r in range(h):
+        for c in range(w):
+            if thin_01[r, c] == 0:
+                continue
+            root = uf_find(parent, idx(r, c))
+            if root == largest_root:
+                largest_cc_mask[r, c] = 1
+
+    return largest_cc_mask
+
+
+def bfs_distance_on_component(src, dst, component_mask):
+    """
+    在 component_mask(0/1) 上做 8 邻接 BFS。
+    返回 src -> dst 的步长；若不可达则返回 None。
+    """
+    if src is None or dst is None:
+        return None
+
+    h, w = component_mask.shape
+    sx, sy = src
+    tx, ty = dst
+
+    if not (0 <= sx < h and 0 <= sy < w and 0 <= tx < h and 0 <= ty < w):
+        return None
+    if component_mask[sx, sy] == 0 or component_mask[tx, ty] == 0:
+        return None
+
+    dist = np.full((h, w), -1, dtype=np.int32)
+    q = deque()
+    q.append((sx, sy))
+    dist[sx, sy] = 0
+
+    dirs8 = [
+        (-1, -1), (-1, 0), (-1, 1),
+        ( 0, -1),          ( 0, 1),
+        ( 1, -1), ( 1, 0), ( 1, 1),
+    ]
+
+    while q:
+        x, y = q.popleft()
+        if (x, y) == (tx, ty):
+            return int(dist[x, y])
+
+        for dx, dy in dirs8:
+            nx, ny = x + dx, y + dy
+            if not (0 <= nx < h and 0 <= ny < w):
+                continue
+            if component_mask[nx, ny] == 0:
+                continue
+            if dist[nx, ny] != -1:
+                continue
+            dist[nx, ny] = dist[x, y] + 1
+            q.append((nx, ny))
+
+    return None
 
 
 class Preprocessor:
@@ -67,6 +293,179 @@ class Preprocessor:
 
         self.prev_hero_pos = None
 
+        # ========= 新增：三层全局记忆 =========
+        # 第一层：可通行地图：1=可走, 0=不能走/未知
+        self.passable_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
+        # 第二层：可见性地图：1=已知, 0=未知
+        self.visibility_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
+        # 第三层：细化地图（局部更新）
+        self.thin_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
+
+        # 最大连通分量（从 thin_map 提取）
+        self.largest_cc_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
+
+        # 每个“已知且可走”的像素映射到 largest_cc_map 上的最近骨架点
+        # 采用欧式最近匹配
+        self.proj_x = np.full((MAP_SIZE_INT, MAP_SIZE_INT), -1, dtype=np.int16)
+        self.proj_y = np.full((MAP_SIZE_INT, MAP_SIZE_INT), -1, dtype=np.int16)
+
+    # ------------------------------------------------------------------
+    # 地图记忆与局部细化
+    # ------------------------------------------------------------------
+    def _update_global_maps(self, hero_x, hero_y, map_info):
+        """
+        将 21x21 局部视野拼接到全局 memory。
+        约定：
+            passable_map: 1=可走, 0=障碍/未知
+            visibility_map: 1=已知, 0=未知
+        返回：
+            local global window: (x0, x1, y0, y1)
+        """
+        h = min(LOCAL_MAP_SIZE, len(map_info))
+        w = min(LOCAL_MAP_SIZE, len(map_info[0]))
+
+        x0 = hero_x - LOCAL_MAP_HALF
+        y0 = hero_y - LOCAL_MAP_HALF
+        x1 = x0 + h
+        y1 = y0 + w
+
+        gx0, gx1, gy0, gy1 = _clip_window(x0, x1, y0, y1, MAP_SIZE_INT)
+
+        for i in range(h):
+            for j in range(w):
+                gx = x0 + i
+                gy = y0 + j
+                if not (0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT):
+                    continue
+
+                # 文档定义：1=可通行，0=障碍
+                visible_val = 1
+                passable_val = 1 if int(map_info[i][j]) != 0 else 0
+
+                self.visibility_map[gx, gy] = visible_val
+                self.passable_map[gx, gy] = passable_val
+
+        return gx0, gx1, gy0, gy1
+
+    def _update_thin_map_local(self, x0, x1, y0, y1):
+        """
+        只对局部区域更新细化图：
+        1. 取一个带 margin 的局部窗口
+        2. 先将 passable_map 与 thin_map 在该窗口内做 OR
+        3. 只对该窗口做 thinning
+        4. 将结果写回 thin_map
+        """
+        rx0, rx1, ry0, ry1 = _clip_window(
+            x0 - THIN_MARGIN, x1 + THIN_MARGIN, y0 - THIN_MARGIN, y1 + THIN_MARGIN, MAP_SIZE_INT
+        )
+
+        region_passable = self.passable_map[rx0:rx1, ry0:ry1]
+        region_thin_old = self.thin_map[rx0:rx1, ry0:ry1]
+
+        # 按你的要求：局部视野和细化地图先做 OR
+        region_seed = np.logical_or(region_passable > 0, region_thin_old > 0).astype(np.uint8)
+
+        if region_seed.size == 0 or region_seed.sum() == 0:
+            self.thin_map[rx0:rx1, ry0:ry1] = 0
+            return rx0, rx1, ry0, ry1
+
+        region_thin_new = zhang_suen_thinning(region_seed, max_iter=THIN_MAX_ITER)
+
+        # 细化图不能跑出可通行区域
+        region_thin_new = np.logical_and(region_thin_new > 0, region_passable > 0).astype(np.uint8)
+
+        self.thin_map[rx0:rx1, ry0:ry1] = region_thin_new
+        return rx0, rx1, ry0, ry1
+
+    def _refresh_largest_component(self):
+        """
+        从全局 thin_map 提取最大连通分量。
+        128x128 很小，这里直接全图重算，稳且简单。
+        """
+        self.largest_cc_map = build_largest_connected_component(self.thin_map)
+
+        # 兜底：若 thin_map 当前为空，则退化为已知可走图的最大连通分量
+        if self.largest_cc_map.sum() == 0 and self.passable_map.sum() > 0:
+            self.largest_cc_map = build_largest_connected_component(self.passable_map)
+
+    def _update_projection_local(self, x0, x1, y0, y1):
+        """
+        只更新局部窗口中“已知且可走”的点到最大连通分量的欧式最近投影。
+        """
+        if self.largest_cc_map.sum() == 0:
+            self.proj_x[x0:x1, y0:y1] = -1
+            self.proj_y[x0:x1, y0:y1] = -1
+            return
+
+        cc_points = np.argwhere(self.largest_cc_map == 1)  # [N,2], each row is (x,y)
+        if len(cc_points) == 0:
+            self.proj_x[x0:x1, y0:y1] = -1
+            self.proj_y[x0:x1, y0:y1] = -1
+            return
+
+        for gx in range(x0, x1):
+            for gy in range(y0, y1):
+                if self.visibility_map[gx, gy] == 0 or self.passable_map[gx, gy] == 0:
+                    self.proj_x[gx, gy] = -1
+                    self.proj_y[gx, gy] = -1
+                    continue
+
+                diff = cc_points - np.array([gx, gy], dtype=np.int32)
+                d2 = diff[:, 0].astype(np.float32) ** 2 + diff[:, 1].astype(np.float32) ** 2
+                idx = int(np.argmin(d2))
+                px, py = cc_points[idx]
+
+                self.proj_x[gx, gy] = int(px)
+                self.proj_y[gx, gy] = int(py)
+
+    def _update_topology_memory(self, hero_x, hero_y, map_info):
+        """
+        每步更新：
+        1. 拼接 passable_map / visibility_map
+        2. 局部更新 thin_map
+        3. 全图刷新最大连通分量
+        4. 局部刷新投影映射
+        """
+        x0, x1, y0, y1 = self._update_global_maps(hero_x, hero_y, map_info)
+        rx0, rx1, ry0, ry1 = self._update_thin_map_local(x0, x1, y0, y1)
+        self._refresh_largest_component()
+        self._update_projection_local(rx0, rx1, ry0, ry1)
+
+    # ------------------------------------------------------------------
+    # 对外方法：拓扑距离
+    # ------------------------------------------------------------------
+    def topo_distance(self, p1, p2):
+        """
+        根据 (x1, y1), (x2, y2) 计算拓扑距离。
+        这里按你要求使用：
+            d(p,q) = d_bfs(proj(p), proj(q))
+        其中 proj 是到最大连通分量上的欧式最近投影。
+        若点未知/不可走/无投影/不可达，则返回 None。
+        """
+        x1, y1 = int(p1[0]), int(p1[1])
+        x2, y2 = int(p2[0]), int(p2[1])
+
+        if not (0 <= x1 < MAP_SIZE_INT and 0 <= y1 < MAP_SIZE_INT):
+            return None
+        if not (0 <= x2 < MAP_SIZE_INT and 0 <= y2 < MAP_SIZE_INT):
+            return None
+
+        if self.visibility_map[x1, y1] == 0 or self.passable_map[x1, y1] == 0:
+            return None
+        if self.visibility_map[x2, y2] == 0 or self.passable_map[x2, y2] == 0:
+            return None
+
+        sx, sy = int(self.proj_x[x1, y1]), int(self.proj_y[x1, y1])
+        tx, ty = int(self.proj_x[x2, y2]), int(self.proj_y[x2, y2])
+
+        if sx < 0 or sy < 0 or tx < 0 or ty < 0:
+            return None
+
+        return bfs_distance_on_component((sx, sy), (tx, ty), self.largest_cc_map)
+
+    # ------------------------------------------------------------------
+    # 主流程：特征处理
+    # ------------------------------------------------------------------
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
 
@@ -84,6 +483,13 @@ class Preprocessor:
         # Hero self features (4D) / 英雄自身特征
         hero = frame_state["heroes"]
         hero_pos = hero["pos"]
+        hero_x = int(hero_pos["x"])
+        hero_y = int(hero_pos["z"])
+
+        # ========= 新增：更新全局拓扑记忆 =========
+        if map_info is not None:
+            self._update_topology_memory(hero_x, hero_y, map_info)
+
         hero_x_norm = _norm(hero_pos["x"], MAP_SIZE)
         hero_z_norm = _norm(hero_pos["z"], MAP_SIZE)
         flash_cd_norm = _norm(hero["flash_cooldown"], MAX_FLASH_CD)
@@ -267,12 +673,12 @@ class Preprocessor:
             "buff_feats": buff_feat,
             "buff_feats_available": len(buffs),
             "progress_feats": progress_feat,
-            "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
+            "hero_pos": (hero_x, hero_y),
             "prev_hero_pos": self.prev_hero_pos,
             "last_action": int(last_action),
         }
 
-        self.prev_hero_pos = (int(hero_pos["x"]), int(hero_pos["z"]))
+        self.prev_hero_pos = (hero_x, hero_y)
 
         return vector_feat, map_feat, reward_feats, legal_action
     
