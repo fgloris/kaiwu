@@ -10,8 +10,8 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 峡谷追猎 PPO 特征预处理与奖励设计。
 """
 
-from collections import deque
 import numpy as np
+from topo_tools import *
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
@@ -34,7 +34,7 @@ THIN_MARGIN = 3
 THIN_MAX_ITER = 8
 
 # 拓扑距离归一化
-MAX_TOPO_DIST = 1000
+MAX_TOPO_DIST = 800
 
 # 角度转向量特征
 DIR8_TO_VEC = {
@@ -56,219 +56,6 @@ def _norm(v, v_max, v_min=0.0):
     """
     v = float(np.clip(v, v_min, v_max))
     return (v - v_min) / (v_max - v_min) if (v_max - v_min) > 1e-6 else 0.0
-
-
-def _clip_window(x0, x1, y0, y1, size=MAP_SIZE_INT):
-    x0 = max(0, x0)
-    y0 = max(0, y0)
-    x1 = min(size, x1)
-    y1 = min(size, y1)
-    return x0, x1, y0, y1
-
-
-def _neighbors(x, y, img01):
-    # P2, P3, ..., P9
-    return [
-        img01[x - 1, y],     # P2
-        img01[x - 1, y + 1], # P3
-        img01[x,     y + 1], # P4
-        img01[x + 1, y + 1], # P5
-        img01[x + 1, y],     # P6
-        img01[x + 1, y - 1], # P7
-        img01[x,     y - 1], # P8
-        img01[x - 1, y - 1], # P9
-    ]
-
-
-def _transitions(neigh):
-    seq = neigh + [neigh[0]]
-    return sum((seq[i] == 0 and seq[i + 1] == 1) for i in range(8))
-
-
-def zhang_suen_thinning(binary01, max_iter=None):
-    """
-    输入: 0/1 二值图
-    输出: 0/1 二值图
-    作用: 在尽量保持连通性的前提下，对亮区域做“拓扑保持削薄”
-    """
-    img = (binary01 > 0).astype(np.uint8).copy()
-    h, w = img.shape
-
-    if h < 3 or w < 3:
-        return img
-
-    changed = True
-    it = 0
-
-    while changed:
-        changed = False
-        to_delete = []
-
-        # step 1
-        for x in range(1, h - 1):
-            for y in range(1, w - 1):
-                if img[x, y] != 1:
-                    continue
-                n = _neighbors(x, y, img)
-                s = sum(n)
-                t = _transitions(n)
-                if (
-                    2 <= s <= 6 and
-                    t == 1 and
-                    n[0] * n[2] * n[4] == 0 and
-                    n[2] * n[4] * n[6] == 0
-                ):
-                    to_delete.append((x, y))
-
-        if to_delete:
-            changed = True
-            for x, y in to_delete:
-                img[x, y] = 0
-
-        to_delete = []
-
-        # step 2
-        for x in range(1, h - 1):
-            for y in range(1, w - 1):
-                if img[x, y] != 1:
-                    continue
-                n = _neighbors(x, y, img)
-                s = sum(n)
-                t = _transitions(n)
-                if (
-                    2 <= s <= 6 and
-                    t == 1 and
-                    n[0] * n[2] * n[6] == 0 and
-                    n[0] * n[4] * n[6] == 0
-                ):
-                    to_delete.append((x, y))
-
-        if to_delete:
-            changed = True
-            for x, y in to_delete:
-                img[x, y] = 0
-
-        it += 1
-        if max_iter is not None and it >= max_iter:
-            break
-
-    return img
-
-
-def uf_find(parent, x):
-    while parent[x] != x:
-        parent[x] = parent[parent[x]]
-        x = parent[x]
-    return x
-
-
-def uf_union(parent, size, a, b):
-    ra = uf_find(parent, a)
-    rb = uf_find(parent, b)
-    if ra == rb:
-        return
-    if size[ra] < size[rb]:
-        ra, rb = rb, ra
-    parent[rb] = ra
-    size[ra] += size[rb]
-
-
-def build_largest_connected_component(thin_01):
-    """
-    在 thin_01 上做 8 邻接连通分量，只保留最大连通分量。
-    输入: 0/1
-    输出: 0/1
-    """
-    h, w = thin_01.shape
-    n = h * w
-
-    parent = np.arange(n, dtype=np.int32)
-    size = np.ones(n, dtype=np.int32)
-
-    def idx(r, c):
-        return r * w + c
-
-    # 只看已扫描过的邻居，避免重复 union
-    prev_neighbors = [(-1, -1), (-1, 0), (-1, 1), (0, -1)]
-
-    for r in range(h):
-        for c in range(w):
-            if thin_01[r, c] == 0:
-                continue
-            cur = idx(r, c)
-            for dr, dc in prev_neighbors:
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < h and 0 <= nc < w and thin_01[nr, nc] == 1:
-                    uf_union(parent, size, cur, idx(nr, nc))
-
-    comp_count = {}
-    for r in range(h):
-        for c in range(w):
-            if thin_01[r, c] == 0:
-                continue
-            root = uf_find(parent, idx(r, c))
-            comp_count[root] = comp_count.get(root, 0) + 1
-
-    largest_cc_mask = np.zeros_like(thin_01, dtype=np.uint8)
-    if len(comp_count) == 0:
-        return largest_cc_mask
-
-    largest_root = max(comp_count, key=comp_count.get)
-
-    for r in range(h):
-        for c in range(w):
-            if thin_01[r, c] == 0:
-                continue
-            root = uf_find(parent, idx(r, c))
-            if root == largest_root:
-                largest_cc_mask[r, c] = 1
-
-    return largest_cc_mask
-
-
-def bfs_distance_on_component(src, dst, component_mask):
-    """
-    在 component_mask(0/1) 上做 8 邻接 BFS。
-    返回 src -> dst 的步长；若不可达则返回 None。
-    """
-    h, w = component_mask.shape
-    sx, sy = src
-    tx, ty = dst
-
-    if not (0 <= sx < h and 0 <= sy < w and 0 <= tx < h and 0 <= ty < w):
-        return None
-    if component_mask[sx, sy] == 0 or component_mask[tx, ty] == 0:
-        return None
-
-    dist = np.full((h, w), -1, dtype=np.int32)
-    q = deque()
-    q.append((sx, sy))
-    dist[sx, sy] = 0
-
-    dirs8 = [
-        (-1, -1), (-1, 0), (-1, 1),
-        ( 0, -1),          ( 0, 1),
-        ( 1, -1), ( 1, 0), ( 1, 1),
-    ]
-
-    while q:
-        x, y = q.popleft()
-        if (x, y) == (tx, ty):
-            return int(dist[x, y])
-
-        for dx, dy in dirs8:
-            nx, ny = x + dx, y + dy
-            if not (0 <= nx < h and 0 <= ny < w):
-                continue
-            if component_mask[nx, ny] == 0:
-                continue
-            if dist[nx, ny] != -1:
-                continue
-            dist[nx, ny] = dist[x, y] + 1
-            q.append((nx, ny))
-
-    return None
-
 
 class Preprocessor:
     def __init__(self, logger=None):
@@ -330,7 +117,7 @@ class Preprocessor:
         x1 = x0 + h
         y1 = y0 + w
 
-        gx0, gx1, gy0, gy1 = _clip_window(x0, x1, y0, y1, MAP_SIZE_INT)
+        gx0, gx1, gy0, gy1 = clip_window(x0, x1, y0, y1, MAP_SIZE_INT)
 
         for i in range(h):
             for j in range(w):
@@ -356,7 +143,7 @@ class Preprocessor:
         3. 只对该窗口做 thinning
         4. 将结果写回 thin_map
         """
-        rx0, rx1, ry0, ry1 = _clip_window(
+        rx0, rx1, ry0, ry1 = clip_window(
             x0 - THIN_MARGIN, x1 + THIN_MARGIN, y0 - THIN_MARGIN, y1 + THIN_MARGIN, MAP_SIZE_INT
         )
 
@@ -510,7 +297,7 @@ class Preprocessor:
                 dir_x, dir_z = DIR8_TO_VEC[dir_idx]
 
                 dist_norm = _norm(m.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET)
-                topo_dist_norm = MAX_TOPO_DIST
+                topo_dist_norm = 1.0
 
                 if is_in_view:
                     m_pos = m["pos"]
@@ -653,7 +440,7 @@ class Preprocessor:
         time_before_second_mounster = _norm(max(0, monster_interval - self.step_no), self.max_step)
         
         monster_speed = env_info.get("monster_speed", 0)
-        self.logger.warning(f"monster speed value:{monster_speed}")
+        self.logger.warning(f"env info: {env_info}, monster speed value:{monster_speed}")
         has_monster_speedup = 0.0 if monster_speed <= 1 else 1.0
         progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, has_monster_speedup], dtype=np.float32)
 
@@ -695,19 +482,25 @@ class Preprocessor:
         self.last_total_score = cur_total_score
         
         # 怪物 dist shaping
-        # 防止首帧的错误 reward
-
+        # 防止首帧和第二个怪物出现前的错误 reward
+        # 怪物一旦出现就不会消失
         monster_dist_reward = 0.0
-        if self.last_monster_dist_norm_1 >= 0  and self.last_monster_dist_norm_2 >= 0:
+        if self.last_monster_dist_norm_1 >= 0 and self.last_monster_dist_norm_2 >= 0: # 第一只、第二只怪物都出现了
             monster_dist_reward = \
                 ( reward_feats['monster_feats'][0][5] - self.last_monster_dist_norm_1) + \
                 0.2 * (reward_feats['monster_feats'][1][5] - self.last_monster_dist_norm_2)
+        elif self.last_monster_dist_norm_1 >= 0:
+            monster_dist_reward = \
+                ( reward_feats['monster_feats'][0][5] - self.last_monster_dist_norm_1)
             
-        self.last_monster_dist_norm_1 = reward_feats['monster_feats'][0][5]
-        self.last_monster_dist_norm_2 = reward_feats['monster_feats'][1][5]
+        if reward_feats['monster_feats'][0][0] > 1e-6: # 检查 is in view, 如果不是则不更新距离
+            self.last_monster_dist_norm_1 = reward_feats['monster_feats'][0][5]
+        if reward_feats['monster_feats'][1][0] > 1e-6: 
+            self.last_monster_dist_norm_2 = reward_feats['monster_feats'][1][5]
 
         # buff和宝箱 distance shaping
         # 靠近奖励但远离不惩罚
+        # buff和宝箱可能会减少，所以需要做好边界处理
 
         treasure_dist_norm_1 = 0.0
         treasure_dist_norm_2 = 0.0
@@ -783,7 +576,7 @@ class Preprocessor:
         dist_shaping_norm_weight = 12.8
 
         reward_vector = [
-            0.30 * score_gain,
+            1.00 * score_gain,
             survive_phase_weight * 0.02,
             0.50 * dist_shaping_norm_weight * monster_dist_reward,
             5.00 * treasure_phase_weight * treasure_reward,
