@@ -77,6 +77,13 @@ class Preprocessor:
         # 第二层：可见性地图：1=已知, 0=未知
         self.visibility_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
 
+    def clip_window(self, x0, x1, y0, y1, size=MAP_SIZE_INT):
+        x0 = max(0, x0)
+        x1 = max(0, x1)
+        y0 = min(size, y0)
+        y1 = min(size, y1)
+        return x0, x1, y0, y1
+
     def update_global_maps(self, hero_x, hero_y, map_info):
         """
         将 21x21 局部视野拼接到全局 memory。
@@ -94,7 +101,7 @@ class Preprocessor:
         x1 = x0 + h
         y1 = y0 + w
 
-        gx0, gx1, gy0, gy1 = clip_window(x0, x1, y0, y1, MAP_SIZE_INT)
+        gx0, gx1, gy0, gy1 = self.clip_window(x0, x1, y0, y1, MAP_SIZE_INT)
 
         for i in range(h):
             for j in range(w):
@@ -261,16 +268,25 @@ class Preprocessor:
             )
 
         if map_info is not None:
-            x0, x1, y0, y1 = self._update_global_maps(hero_pos['x'], hero_pos['y'], map_info)
+            x0, x1, y0, y1 = self.update_global_maps(hero_pos['x'], hero_pos['y'], map_info)
 
-        # 局部地图特征 (16D)
-        map_feat = np.zeros((21, 21), dtype=np.float32)
-        if map_info is not None:
-            h = min(21, len(map_info))
-            w = min(21, len(map_info[0]))
-            for i in range(h):
-                for j in range(w):
-                    map_feat[i, j] = float(map_info[i][j] != 0)
+        map_feat = np.zeros((2, 36, 36), dtype=np.float32)
+
+        crop_size = 36
+        half = crop_size // 2  # 18
+
+        gx0 = hero_pos['x'] - half
+        gy0 = hero_pos['y'] - half
+        gx1 = gx0 + crop_size
+        gy1 = gy0 + crop_size
+
+        for i in range(crop_size):
+            for j in range(crop_size):
+                gx = gx0 + i
+                gy = gy0 + j
+                if 0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT:
+                    map_feat[0, i, j] = float(self.passable_map[gx, gy])
+                    map_feat[1, i, j] = float(self.visibility_map[gx, gy])
 
         # 合法动作掩码 (8D)
         legal_action = [1] * 16
