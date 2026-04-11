@@ -291,44 +291,44 @@ class Preprocessor:
                 if config_id in target_dict:
                     del target_dict[config_id]
 
-        def _get_nearest_available_organs_from_memory(self, hero_pos, organ_dict, topk=2):
-            """
-            从全局记忆中取最近的 topk 个可获取物体。
-            返回的每个元素都会补上:
-                raw_dist, topo_dist, _dx, _dz
-            """
-            hero_x, hero_y = int(hero_pos["x"]), int(hero_pos["z"])
-            results = []
+    def _get_nearest_available_organs_from_memory(self, hero_pos, organ_dict, topk=2):
+        """
+        从全局记忆中取最近的 topk 个可获取物体。
+        返回的每个元素都会补上:
+            raw_dist, topo_dist, _dx, _dz
+        """
+        hero_x, hero_y = int(hero_pos["x"]), int(hero_pos["z"])
+        results = []
 
-            for _, item in organ_dict.items():
-                x, z = item["pos"]
+        for _, item in organ_dict.items():
+            x, z = item["pos"]
 
-                # 必须是已知且可走，否则 topo_distance 会断言
-                if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
-                    continue
-                if self.visibility_map[x, z] != 1:
-                    continue
-                if self.passable_map[x, z] != 1:
-                    continue
+            # 必须是已知且可走，否则 topo_distance 会断言
+            if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
+                continue
+            if self.visibility_map[x, z] != 1:
+                continue
+            if self.passable_map[x, z] != 1:
+                continue
 
-                dx = float(x - hero_x)
-                dz = float(z - hero_y)
-                raw_dist = np.sqrt(dx * dx + dz * dz)
+            dx = float(x - hero_x)
+            dz = float(z - hero_y)
+            raw_dist = np.sqrt(dx * dx + dz * dz)
 
-                topo_dist = self.topo_distance((x, z), (hero_x, hero_y))
-                if topo_dist is None:
-                    continue
+            topo_dist = self.topo_distance((x, z), (hero_x, hero_y))
+            if topo_dist is None:
+                continue
 
-                new_item = dict(item)
-                new_item["raw_dist"] = raw_dist
-                new_item["topo_dist"] = topo_dist
-                new_item["_dx"] = dx
-                new_item["_dz"] = dz
-                results.append(new_item)
+            new_item = dict(item)
+            new_item["raw_dist"] = raw_dist
+            new_item["topo_dist"] = topo_dist
+            new_item["_dx"] = dx
+            new_item["_dz"] = dz
+            results.append(new_item)
 
-            # 最近优先：拓扑距离优先，欧氏距离次之
-            results.sort(key=lambda x: (x["topo_dist"], x["raw_dist"]))
-            return results[:topk]
+        # 最近优先：拓扑距离优先，欧氏距离次之
+        results.sort(key=lambda x: (x["topo_dist"], x["raw_dist"]))
+        return results[:topk]
         
     # ------------------------------------------------------------------
     # 主流程：特征处理
@@ -506,10 +506,10 @@ class Preprocessor:
         monster_interval = env_info.get("monster_interval", 300)
         time_before_second_mounster = _norm(max(0, monster_interval - self.step_no), self.max_step)
         
-        monster_speed = env_info.get("monster_speed", 0)
-        self.logger.warning(f"env info: {env_info}, monster speed value:{monster_speed}")
-        has_monster_speedup = 0.0 if monster_speed <= 1 else 1.0
-        progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, has_monster_speedup], dtype=np.float32)
+        monster_speedup_time = env_info.get("monster_speed_boost_step", 0)
+        self.logger.warning(f"env info: {env_info}, monster speedup time value:{monster_speedup_time}")
+        time_before_mounster_speedup = _norm(max(0, monster_speedup_time - self.step_no), self.max_step)
+        progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, time_before_mounster_speedup], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         vector_feat = np.concatenate(
@@ -615,7 +615,7 @@ class Preprocessor:
         flash_reward = 0.0
         flash_count = env_info.get("flash_count", 0)
         if (flash_count - self.last_flash_count) > 0:
-            flash_reward = 0.5 * monster_dist_reward + 0.5 * treasure_dist_reward + 0.1 * buff_dist_reward
+            flash_reward = 0.8 * monster_dist_reward + 0.5 * treasure_dist_reward + 0.1 * buff_dist_reward
         self.last_flash_count = flash_count
 
         # 撞墙惩罚
@@ -630,7 +630,7 @@ class Preprocessor:
             if not moved:
                 wall_penalty = -0.2
 
-        if reward_feats["progress_feats"][2] > 0 and reward_feats["progress_feats"][3] == 0: # time before second monseter and has monster speedup
+        if reward_feats["progress_feats"][2] > 0 and reward_feats["progress_feats"][3] > 0: # time before second monseter and has monster speedup
             # 早期：鼓励探索和拿宝箱
             treasure_phase_weight = 1.50
             survive_phase_weight = 0.85
@@ -645,7 +645,7 @@ class Preprocessor:
         reward_vector = [
             1.00 * score_gain,
             survive_phase_weight * 0.02,
-            0.08 * monster_dist_reward,
+            0.15 * survive_phase_weight * monster_dist_reward,
             5.00 * treasure_phase_weight * treasure_reward,
             0.25 * treasure_phase_weight * dist_shaping_norm_weight * treasure_dist_reward,
             0.35 * buff_reward,
