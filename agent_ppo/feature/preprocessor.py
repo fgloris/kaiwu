@@ -14,6 +14,10 @@ import numpy as np
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
+MAP_SIZE_INT = 128
+LOCAL_MAP_SIZE = 21
+LOCAL_MAP_HALF = 10
+
 # Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 5.0
 # Max distance bucket / 距离桶最大值
@@ -66,6 +70,47 @@ class Preprocessor:
         self.last_buff_dist_norm_2 = 0.0
 
         self.prev_hero_pos = None
+
+        # ========= 两层全局记忆 =========
+        # 第一层：可通行地图：1=可走, 0=不能走/未知
+        self.passable_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
+        # 第二层：可见性地图：1=已知, 0=未知
+        self.visibility_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
+
+    def update_global_maps(self, hero_x, hero_y, map_info):
+        """
+        将 21x21 局部视野拼接到全局 memory。
+        约定：
+            passable_map: 1=可走, 0=障碍/未知
+            visibility_map: 1=已知, 0=未知
+        返回：
+            local global window: (x0, x1, y0, y1)
+        """
+        h = min(LOCAL_MAP_SIZE, len(map_info))
+        w = min(LOCAL_MAP_SIZE, len(map_info[0]))
+
+        x0 = hero_x - LOCAL_MAP_HALF
+        y0 = hero_y - LOCAL_MAP_HALF
+        x1 = x0 + h
+        y1 = y0 + w
+
+        gx0, gx1, gy0, gy1 = clip_window(x0, x1, y0, y1, MAP_SIZE_INT)
+
+        for i in range(h):
+            for j in range(w):
+                gx = x0 + j
+                gy = y0 + i
+                if not (0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT):
+                    continue
+
+                # 文档定义：1=可通行，0=障碍
+                visible_val = 1
+                passable_val = 1 if int(map_info[i][j]) != 0 else 0
+
+                self.visibility_map[gx, gy] = visible_val
+                self.passable_map[gx, gy] = passable_val
+
+        return gx0, gx1, gy0, gy1
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -214,6 +259,9 @@ class Preprocessor:
                 [rel_x, rel_z, dist_norm, dir_x, dir_z],
                 dtype=np.float32,
             )
+
+        if map_info is not None:
+            x0, x1, y0, y1 = self._update_global_maps(hero_pos['x'], hero_pos['y'], map_info)
 
         # 局部地图特征 (16D)
         map_feat = np.zeros((21, 21), dtype=np.float32)
