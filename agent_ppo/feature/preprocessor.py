@@ -240,7 +240,9 @@ class Preprocessor:
         # 进度特征
         step_norm = _norm(self.step_no, self.max_step)
         progress_treasure_collect = _norm(int(hero.get("treasure_collected_count", 0)), 10)
-        progress_feat = np.array([step_norm, progress_treasure_collect], dtype=np.float32)
+        time_before_second_mounster = _norm(max(0, env_info.get("monster_interval", 300) - self.step_no), self.max_step)
+        has_monster_speedup = 0.0 if env_info.get("monster_speed", 300) <= 1 else 1.0
+        progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, has_monster_speedup], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         vector_feat = np.concatenate(

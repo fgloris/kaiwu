@@ -20,7 +20,7 @@ class Config:
         10,   # treasures
         10,   # buffs
         16,  # legal action
-        2,   # progress
+        4,   # progress
     ]
     VECTOR_FEATURE_LEN = sum(VECTOR_FEATURES)
 
