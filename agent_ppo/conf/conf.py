@@ -15,8 +15,8 @@ class Config:
     # 非地图向量特征维度
     VECTOR_FEATURES = [
         4,   # hero
-        7,   # monster1
-        7,   # monster2
+        8,   # monster1
+        8,   # monster2
         10,   # treasures
         10,   # buffs
         16,  # legal action

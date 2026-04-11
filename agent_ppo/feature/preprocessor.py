@@ -33,6 +33,9 @@ THIN_MARGIN = 3
 # thinning 最大迭代次数；不宜太大，避免每步开销上升
 THIN_MAX_ITER = 8
 
+# 拓扑距离归一化
+MAX_TOPO_DIST = 1000
+
 # 角度转向量特征
 DIR8_TO_VEC = {
     0: (1.0, 0.0),
@@ -228,9 +231,6 @@ def bfs_distance_on_component(src, dst, component_mask):
     在 component_mask(0/1) 上做 8 邻接 BFS。
     返回 src -> dst 的步长；若不可达则返回 None。
     """
-    if src is None or dst is None:
-        return None
-
     h, w = component_mask.shape
     sx, sy = src
     tx, ty = dst
@@ -390,7 +390,7 @@ class Preprocessor:
 
     def _update_projection_local(self, x0, x1, y0, y1):
         """
-        只更新局部窗口中“已知且可走”的点到最大连通分量的欧式最近投影。
+        更新局部窗口中所有的点到最大连通分量的欧式最近投影。
         """
         if self.largest_cc_map.sum() == 0:
             self.proj_x[x0:x1, y0:y1] = -1
@@ -405,10 +405,10 @@ class Preprocessor:
 
         for gx in range(x0, x1):
             for gy in range(y0, y1):
-                if self.visibility_map[gx, gy] == 0 or self.passable_map[gx, gy] == 0:
-                    self.proj_x[gx, gy] = -1
-                    self.proj_y[gx, gy] = -1
-                    continue
+                #if self.visibility_map[gx, gy] == 0 or self.passable_map[gx, gy] == 0:
+                #    self.proj_x[gx, gy] = -1
+                #    self.proj_y[gx, gy] = -1
+                #    continue
 
                 diff = cc_points - np.array([gx, gy], dtype=np.int32)
                 d2 = diff[:, 0].astype(np.float32) ** 2 + diff[:, 1].astype(np.float32) ** 2
@@ -445,21 +445,8 @@ class Preprocessor:
         x1, y1 = int(p1[0]), int(p1[1])
         x2, y2 = int(p2[0]), int(p2[1])
 
-        if not (0 <= x1 < MAP_SIZE_INT and 0 <= y1 < MAP_SIZE_INT):
-            return None
-        if not (0 <= x2 < MAP_SIZE_INT and 0 <= y2 < MAP_SIZE_INT):
-            return None
-
-        if self.visibility_map[x1, y1] == 0 or self.passable_map[x1, y1] == 0:
-            return None
-        if self.visibility_map[x2, y2] == 0 or self.passable_map[x2, y2] == 0:
-            return None
-
         sx, sy = int(self.proj_x[x1, y1]), int(self.proj_y[x1, y1])
         tx, ty = int(self.proj_x[x2, y2]), int(self.proj_y[x2, y2])
-
-        if sx < 0 or sy < 0 or tx < 0 or ty < 0:
-            return None
 
         return bfs_distance_on_component((sx, sy), (tx, ty), self.largest_cc_map)
 
@@ -529,6 +516,9 @@ class Preprocessor:
 
                     raw_dist = np.sqrt(dx * dx + dz * dz)
                     dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
+                    topo_dist = self.topo_distance((m_pos["x"], m_pos["z"]), (hero_pos["x"], hero_pos["z"]))
+                    assert topo_dist is not None, "topo_dist is None in monster!"
+                    topo_dist_norm = _norm(topo_dist, MAX_TOPO_DIST)
 
                     # 视野内时，用连续方向覆盖离散方向
                     if raw_dist > 1e-6:
@@ -537,12 +527,12 @@ class Preprocessor:
 
                 monster_feats.append(
                     np.array(
-                        [is_in_view, m_speed_norm, rel_x, rel_z, dist_norm, dir_x, dir_z],
+                        [is_in_view, m_speed_norm, rel_x, rel_z, dist_norm, topo_dist_norm, dir_x, dir_z],
                         dtype=np.float32,
                     )
                 )
             else:
-                monster_feats.append(np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32))
+                monster_feats.append(np.array([0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0], dtype=np.float32))
 
         # buff和宝箱特征
         organs = frame_state.get("organs", [])
@@ -564,9 +554,12 @@ class Preprocessor:
             dx = float(organ_pos["x"] - hero_pos["x"])
             dz = float(organ_pos["z"] - hero_pos["z"])
             raw_dist = np.sqrt(dx * dx + dz * dz)
+            topo_dist = self.topo_distance((organ_pos["x"], organ_pos["z"]), (hero_pos["x"], hero_pos["z"]))
+            assert topo_dist is not None, "topo_dist is None in organ!"
 
             # 存起来，方便排序和后续直接用
             organ["raw_dist"] = raw_dist
+            organ["topo_dist"] = topo_dist
             organ["_dx"] = dx
             organ["_dz"] = dz
 
