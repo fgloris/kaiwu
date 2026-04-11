@@ -783,8 +783,8 @@ class Preprocessor:
         dist_shaping_norm_weight = 12.8
 
         reward_vector = [
-            1.0 * score_gain,
-            survive_phase_weight * 0.01,
+            0.30 * score_gain,
+            survive_phase_weight * 0.02,
             0.50 * dist_shaping_norm_weight * monster_dist_reward,
             5.00 * treasure_phase_weight * treasure_reward,
             0.25 * treasure_phase_weight * dist_shaping_norm_weight * treasure_dist_reward,
