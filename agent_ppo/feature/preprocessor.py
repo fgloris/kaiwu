@@ -218,6 +218,58 @@ class Preprocessor:
                 self.proj_x[gx, gy] = int(px)
                 self.proj_y[gx, gy] = int(py)
 
+    def encode_binary_map_zero_rle(self, binary_map):
+        """
+        将 2D 二值图编码成:
+            HxW|payload
+
+        payload 规则:
+            - '1' 表示一个前景像素
+            - 'z<k>;' 表示连续 k 个 0
+        例如:
+            0000010010000  ->  z5;1z2;1z4;
+        """
+        arr = (binary_map > 0).astype(np.uint8).reshape(-1)
+
+        out = []
+        zero_count = 0
+
+        for v in arr:
+            if v == 0:
+                zero_count += 1
+            else:
+                if zero_count > 0:
+                    out.append(f"z{zero_count};")
+                    zero_count = 0
+                out.append("1")
+
+        if zero_count > 0:
+            out.append(f"z{zero_count};")
+
+        h, w = binary_map.shape
+        payload = "".join(out)
+        return f"{h}x{w}|{payload}"
+
+    def _log_binary_map(self, name, binary_map, hero_x=None, hero_y=None):
+        """
+        用 logger.info 打印二值图。
+        格式：
+            <name> step=<step> hero=(x,y) data=<HxW|zero-rle>
+        """
+        if self.logger is None:
+            return
+
+        encoded = self.encode_binary_map_zero_rle(binary_map)
+
+        if hero_x is not None and hero_y is not None:
+            self.logger.warning(
+                f"{name} step={self.step_no} hero=({hero_x},{hero_y}) data={encoded}"
+            )
+        else:
+            self.logger.warning(
+                f"{name} step={self.step_no} data={encoded}"
+            )
+
     def _update_topology_memory(self, hero_x, hero_y, map_info):
         """
         每步更新：
@@ -230,6 +282,8 @@ class Preprocessor:
         rx0, rx1, ry0, ry1 = self._update_thin_map_local(x0, x1, y0, y1)
         self._refresh_largest_component()
         self._update_projection_local(rx0, rx1, ry0, ry1)
+        self._log_binary_map("THIN_MAP", self.thin_map, hero_x, hero_y)
+        self._log_binary_map("THIN_CC_MAP", self.largest_cc_map, hero_x, hero_y)
 
     # ------------------------------------------------------------------
     # 对外方法：拓扑距离
