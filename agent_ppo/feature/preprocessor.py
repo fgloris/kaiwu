@@ -81,7 +81,7 @@ class Preprocessor:
 
         self.prev_hero_pos = None
 
-        # ========= 新增：三层全局记忆 =========
+        # ========= 三层全局记忆 =========
         # 第一层：可通行地图：1=可走, 0=不能走/未知
         self.passable_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
         # 第二层：可见性地图：1=已知, 0=未知
@@ -96,6 +96,18 @@ class Preprocessor:
         # 采用欧式最近匹配
         self.proj_x = np.full((MAP_SIZE_INT, MAP_SIZE_INT), -1, dtype=np.int16)
         self.proj_y = np.full((MAP_SIZE_INT, MAP_SIZE_INT), -1, dtype=np.int16)
+
+        # ========= 全局物件记忆 =========
+        # key: config_id
+        # value: {
+        #   "sub_type": 1 or 2,
+        #   "config_id": int,
+        #   "status": int,      # 1=可获取
+        #   "pos": (x, z),
+        #   "last_seen_step": int,
+        # }
+        self.global_treasures = {}
+        self.global_buffs = {}
 
     # ------------------------------------------------------------------
     # 地图记忆与局部细化
@@ -243,6 +255,81 @@ class Preprocessor:
 
         return bfs_distance_on_component((sx, sy), (tx, ty), self.largest_cc_map)
 
+    def _update_global_organ_memory(self, organs):
+        """
+        用当前视野内 organs 更新全局记忆。
+        规则：
+        - status == 1：写入/覆盖记忆
+        - status != 1：从记忆中删除（说明当前可见且不可获取）
+        """
+        for organ in organs:
+            sub_type = int(organ.get("sub_type", 0))
+            config_id = int(organ.get("config_id", -1))
+            status = int(organ.get("status", 0))
+
+            if sub_type not in (1, 2) or config_id < 0:
+                continue
+
+            organ_pos = organ.get("pos", {})
+            x = int(organ_pos.get("x", -1))
+            z = int(organ_pos.get("z", -1))
+            if x < 0 or z < 0:
+                continue
+
+            target_dict = self.global_treasures if sub_type == 1 else self.global_buffs
+
+            if status == 1:
+                target_dict[config_id] = {
+                    "sub_type": sub_type,
+                    "config_id": config_id,
+                    "status": status,
+                    "pos": (x, z),
+                    "last_seen_step": self.step_no,
+                }
+            else:
+                # 当前帧能看见且不可获取，直接删掉
+                if config_id in target_dict:
+                    del target_dict[config_id]
+
+        def _get_nearest_available_organs_from_memory(self, hero_pos, organ_dict, topk=2):
+            """
+            从全局记忆中取最近的 topk 个可获取物体。
+            返回的每个元素都会补上:
+                raw_dist, topo_dist, _dx, _dz
+            """
+            hero_x, hero_y = int(hero_pos["x"]), int(hero_pos["z"])
+            results = []
+
+            for _, item in organ_dict.items():
+                x, z = item["pos"]
+
+                # 必须是已知且可走，否则 topo_distance 会断言
+                if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
+                    continue
+                if self.visibility_map[x, z] != 1:
+                    continue
+                if self.passable_map[x, z] != 1:
+                    continue
+
+                dx = float(x - hero_x)
+                dz = float(z - hero_y)
+                raw_dist = np.sqrt(dx * dx + dz * dz)
+
+                topo_dist = self.topo_distance((x, z), (hero_x, hero_y))
+                if topo_dist is None:
+                    continue
+
+                new_item = dict(item)
+                new_item["raw_dist"] = raw_dist
+                new_item["topo_dist"] = topo_dist
+                new_item["_dx"] = dx
+                new_item["_dz"] = dz
+                results.append(new_item)
+
+            # 最近优先：拓扑距离优先，欧氏距离次之
+            results.sort(key=lambda x: (x["topo_dist"], x["raw_dist"]))
+            return results[:topk]
+        
     # ------------------------------------------------------------------
     # 主流程：特征处理
     # ------------------------------------------------------------------
@@ -334,41 +421,22 @@ class Preprocessor:
         organs = frame_state.get("organs", [])
         self.logger.warning(f"len of organs:{len(organs)}, organs:{organs}")
 
+        # 先更新全局记忆
+        self._update_global_organ_memory(organs)
+
+        # 从全局记忆里取最近两个
+        treasures = self._get_nearest_available_organs_from_memory(
+            hero_pos, self.global_treasures, topk=2
+        )
+        buffs = self._get_nearest_available_organs_from_memory(
+            hero_pos, self.global_buffs, topk=2
+        )
+
         # 前2个宝箱 / buff：每个5维 [rel_x, rel_z, dist_norm, dir_x, dir_z]
         treasure_feat = np.zeros(10, dtype=np.float32)
         buff_feat = np.zeros(10, dtype=np.float32)
 
-        treasures = []
-        buffs = []
-
-        for organ in organs:
-            if organ.get("status", 0) != 1:
-                continue
-
-            sub_type = organ.get("sub_type", 0)
-            organ_pos = organ["pos"]
-
-            dx = float(organ_pos["x"] - hero_pos["x"])
-            dz = float(organ_pos["z"] - hero_pos["z"])
-            raw_dist = np.sqrt(dx * dx + dz * dz)
-            topo_dist = self.topo_distance((organ_pos["x"], organ_pos["z"]), (hero_pos["x"], hero_pos["z"]))
-            assert topo_dist is not None, "topo_dist is None in organ!"
-
-            # 存起来，方便排序和后续直接用
-            organ["raw_dist"] = raw_dist
-            organ["topo_dist"] = topo_dist
-            organ["_dx"] = dx
-            organ["_dz"] = dz
-
-            if sub_type == 1:
-                treasures.append(organ)
-            elif sub_type == 2:
-                buffs.append(organ)
-
-        treasures.sort(key=lambda x: x.get("raw_dist", 1e9))
-        buffs.sort(key=lambda x: x.get("raw_dist", 1e9))
-
-        for i, organ in enumerate(treasures[:2]):
+        for i, organ in enumerate(treasures):
             dx = organ["_dx"]
             dz = organ["_dz"]
             raw_dist = organ.get("raw_dist", MAP_SIZE * 1.41)
@@ -377,12 +445,11 @@ class Preprocessor:
             rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
             dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
 
-            # 优先用连续方向；太近时退化到离散方向
             if raw_dist > 1e-6:
                 dir_x = dx / raw_dist
                 dir_z = dz / raw_dist
             else:
-                dir_idx = int(organ.get("hero_relative_direction", 0)) % 8
+                dir_idx = 0
                 dir_x, dir_z = DIR8_TO_VEC[dir_idx]
 
             treasure_feat[i * 5 : i * 5 + 5] = np.array(
@@ -390,7 +457,7 @@ class Preprocessor:
                 dtype=np.float32,
             )
 
-        for i, organ in enumerate(buffs[:2]):
+        for i, organ in enumerate(buffs):
             dx = organ["_dx"]
             dz = organ["_dz"]
             raw_dist = organ.get("raw_dist", MAP_SIZE * 1.41)
@@ -403,7 +470,7 @@ class Preprocessor:
                 dir_x = dx / raw_dist
                 dir_z = dz / raw_dist
             else:
-                dir_idx = int(organ.get("hero_relative_direction", 0)) % 8
+                dir_idx = 0
                 dir_x, dir_z = DIR8_TO_VEC[dir_idx]
 
             buff_feat[i * 5 : i * 5 + 5] = np.array(
