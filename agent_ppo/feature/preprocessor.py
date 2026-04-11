@@ -271,7 +271,8 @@ def bfs_distance_on_component(src, dst, component_mask):
 
 
 class Preprocessor:
-    def __init__(self):
+    def __init__(self, logger=None):
+        self.logger = logger
         self.reset()
 
     def reset(self):
@@ -544,6 +545,7 @@ class Preprocessor:
 
         # buff和宝箱特征
         organs = frame_state.get("organs", [])
+        self.logger.warning(f"len of organs:{len(organs)}, organs:{organs}")
 
         # 前2个宝箱 / buff：每个5维 [rel_x, rel_z, dist_norm, dir_x, dir_z]
         treasure_feat = np.zeros(10, dtype=np.float32)
@@ -648,9 +650,11 @@ class Preprocessor:
         step_norm = _norm(self.step_no, self.max_step)
         progress_treasure_collect = _norm(int(hero.get("treasure_collected_count", 0)), 10)
         monster_interval = env_info.get("monster_interval", 300)
-        assert monster_interval > 0, f"monster insterval < 0! value:{monster_interval}"
         time_before_second_mounster = _norm(max(0, monster_interval - self.step_no), self.max_step)
-        has_monster_speedup = 0.0 if env_info.get("monster_speed", 0) <= 1 else 1.0
+        
+        monster_speed = env_info.get("monster_speed", 0)
+        self.logger.warning(f"monster speed value:{monster_speed}")
+        has_monster_speedup = 0.0 if monster_speed <= 1 else 1.0
         progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, has_monster_speedup], dtype=np.float32)
 
         # Concatenate features / 拼接特征
@@ -766,25 +770,21 @@ class Preprocessor:
             if not moved:
                 wall_penalty = -0.2
 
-        if reward_feats["progress_feats"][2] > 0: # time before second monseter
+        if reward_feats["progress_feats"][2] > 0 and reward_feats["progress_feats"][3] == 0: # time before second monseter and has monster speedup
             # 早期：鼓励探索和拿宝箱
-            treasure_phase_weight = 1.20
+            treasure_phase_weight = 1.50
             survive_phase_weight = 0.85
-        elif reward_feats["progress_feats"][3] == 0: # has monster speedup
-            # 中期：逐步平衡
-            treasure_phase_weight = 1.00
-            survive_phase_weight = 1.00
         else:
             # 后期：怪物加速后，生存优先
-            treasure_phase_weight = 0.75
-            survive_phase_weight = 2.00
+            treasure_phase_weight = 0.85
+            survive_phase_weight = 1.50
 
         # final step reward vector
         dist_shaping_norm_weight = 12.8
 
         reward_vector = [
-            0.30 * score_gain,
-            survive_phase_weight * 0.02,
+            1.0 * score_gain,
+            survive_phase_weight * 0.01,
             0.50 * dist_shaping_norm_weight * monster_dist_reward,
             5.00 * treasure_phase_weight * treasure_reward,
             0.25 * treasure_phase_weight * dist_shaping_norm_weight * treasure_dist_reward,
