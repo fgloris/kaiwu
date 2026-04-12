@@ -290,7 +290,7 @@ class Preprocessor:
             )
 
         if map_info is not None:
-            x0, x1, y0, y1 = self.update_global_maps(hero_pos['x'], hero_pos['y'], map_info)
+            x0, x1, y0, y1 = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
 
         map_feat = np.zeros((2, 36, 36), dtype=np.float32)
 
@@ -298,7 +298,7 @@ class Preprocessor:
         half = crop_size // 2  # 18
 
         gx0 = hero_pos['x'] - half
-        gy0 = hero_pos['y'] - half
+        gy0 = hero_pos['z'] - half
         gx1 = gx0 + crop_size
         gy1 = gy0 + crop_size
 
