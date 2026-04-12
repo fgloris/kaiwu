@@ -109,10 +109,6 @@ class EpisodeRunner:
                 "r_survival_gain_sum",
                 "r_monster_dist_sum",
                 "r_monster_los_break_sum",
-                "r_treasure_gain_sum",
-                "r_treasure_dist_sum",
-                "r_buff_gain_sum",
-                "r_buff_dist_sum",
                 "r_flash_sum",
                 "r_abb_penalty_sum",
             ]

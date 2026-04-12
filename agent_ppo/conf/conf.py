@@ -17,8 +17,6 @@ class Config:
         4,   # hero
         7,   # monster1
         7,   # monster2
-        10,   # treasures
-        10,   # buffs
         8,   # move safety
         4,   # progress
     ]
@@ -37,7 +35,7 @@ class Config:
 
     GAMMA = 0.99
     LAMDA = 0.95
-    INIT_LEARNING_RATE_START = 0.0005
+    INIT_LEARNING_RATE_START = 0.0003
     BETA_START = 0.001
     CLIP_PARAM = 0.2
     VF_COEF = 1.0

@@ -178,14 +178,7 @@ class Preprocessor:
         self.last_monster_blocked_2 = False
 
         self.last_total_score = 0.0
-        self.last_treasure_collected = 0
-        self.last_collected_buff = 0
         self.last_flash_count = 0
-
-        self.last_treasure_dist_norm_1 = 0.0
-        self.last_treasure_dist_norm_2 = 0.0
-        self.last_buff_dist_norm_1 = 0.0
-        self.last_buff_dist_norm_2 = 0.0
 
         self.prev_hero_pos = None
         self.recent_positions = deque(maxlen=ABB_WINDOW)
@@ -542,83 +535,6 @@ class Preprocessor:
             else:
                 monster_feats.append(np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32))
 
-        # buff和宝箱特征
-        organs = frame_state.get("organs", [])
-
-        # 前2个宝箱 / buff：每个5维 [rel_x, rel_z, dist_norm, dir_x, dir_z]
-        treasure_feat = np.zeros(10, dtype=np.float32)
-        buff_feat = np.zeros(10, dtype=np.float32)
-
-        treasures = []
-        buffs = []
-
-        for organ in organs:
-            if organ.get("status", 0) != 1:
-                continue
-
-            sub_type = organ.get("sub_type", 0)
-            organ_pos = organ["pos"]
-
-            dx = float(organ_pos["x"] - hero_pos["x"])
-            dz = float(organ_pos["z"] - hero_pos["z"])
-            raw_dist = np.sqrt(dx * dx + dz * dz)
-
-            # 存起来，方便排序和后续直接用
-            organ["raw_dist"] = raw_dist
-            organ["_dx"] = dx
-            organ["_dz"] = dz
-
-            if sub_type == 1:
-                treasures.append(organ)
-            elif sub_type == 2:
-                buffs.append(organ)
-
-        treasures.sort(key=lambda x: x.get("raw_dist", 1e9))
-        buffs.sort(key=lambda x: x.get("raw_dist", 1e9))
-
-        for i, organ in enumerate(treasures[:2]):
-            dx = organ["_dx"]
-            dz = organ["_dz"]
-            raw_dist = organ.get("raw_dist", MAP_SIZE * 1.41)
-
-            rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
-            rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
-            dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
-
-            # 优先用连续方向；太近时退化到离散方向
-            if raw_dist > 1e-6:
-                dir_x = dx / raw_dist
-                dir_z = dz / raw_dist
-            else:
-                dir_idx = int(organ.get("hero_relative_direction", 0))
-                dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
-
-            treasure_feat[i * 5 : i * 5 + 5] = np.array(
-                [rel_x, rel_z, dist_norm, dir_x, dir_z],
-                dtype=np.float32,
-            )
-
-        for i, organ in enumerate(buffs[:2]):
-            dx = organ["_dx"]
-            dz = organ["_dz"]
-            raw_dist = organ.get("raw_dist", MAP_SIZE * 1.41)
-
-            rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
-            rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
-            dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
-
-            if raw_dist > 1e-6:
-                dir_x = dx / raw_dist
-                dir_z = dz / raw_dist
-            else:
-                dir_idx = int(organ.get("hero_relative_direction", 0))
-                dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
-
-            buff_feat[i * 5 : i * 5 + 5] = np.array(
-                [rel_x, rel_z, dist_norm, dir_x, dir_z],
-                dtype=np.float32,
-            )
-
         if map_info is not None:
             x0, x1, y0, y1 = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
 
@@ -699,8 +615,6 @@ class Preprocessor:
                 hero_feat,
                 monster_feats[0],
                 monster_feats[1],
-                treasure_feat,
-                buff_feat,
                 move_safety_feat,
                 progress_feat,
             ]
@@ -709,10 +623,6 @@ class Preprocessor:
         reward_feats = {
             "monster_feats": monster_feats,
             "monster_feats_available": len(monsters),
-            "treasure_feats": treasure_feat,
-            "treasure_feats_available": len(treasures),
-            "buff_feats": buff_feat,
-            "buff_feats_available": len(buffs),
             "progress_feats": progress_feat,
             "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
             "prev_hero_pos": self.prev_hero_pos,
@@ -780,70 +690,18 @@ class Preprocessor:
         self.last_monster_blocked_1 = cur_blocked_1
         self.last_monster_blocked_2 = cur_blocked_2
 
-        # buff和宝箱 distance shaping
-        # 靠近奖励但远离不惩罚
-
-        treasure_dist_norm_1 = 0.0
-        treasure_dist_norm_2 = 0.0
-        if reward_feats['treasure_feats_available'] > 0: 
-            treasure_dist_norm_1 = reward_feats['treasure_feats'][2]
-            
-        if reward_feats['treasure_feats_available'] > 1:
-            treasure_dist_norm_2 = reward_feats['treasure_feats'][7]
-
-        treasure_dist_reward = max(0.0, (self.last_treasure_dist_norm_1 - treasure_dist_norm_1) + 
-                            0.2 * (self.last_treasure_dist_norm_2 - treasure_dist_norm_2))
-        
-        self.last_treasure_dist_norm_1 = treasure_dist_norm_1
-        self.last_treasure_dist_norm_2 = treasure_dist_norm_2
-
-        buff_dist_norm_1 = 0.0
-        buff_dist_norm_2 = 0.0
-        if reward_feats['buff_feats_available'] > 0: 
-            buff_dist_norm_1 = reward_feats['buff_feats'][2]
-            
-        if reward_feats['buff_feats_available'] > 1:
-            buff_dist_norm_2 = reward_feats['buff_feats'][7]
-
-        buff_dist_reward = max(0.0, (self.last_buff_dist_norm_1 - buff_dist_norm_1) + 
-                        0.2 * (self.last_buff_dist_norm_2 - buff_dist_norm_2))
-        
-        self.last_buff_dist_norm_1 = buff_dist_norm_1
-        self.last_buff_dist_norm_2 = buff_dist_norm_2
-
-        # 宝箱收集奖励
-        cur_treasure_collected = int(env_obs["observation"]["frame_state"]["heroes"].get("treasure_collected_count", 0))
-        treasure_gain = cur_treasure_collected - self.last_treasure_collected
-        self.last_treasure_collected = cur_treasure_collected
-
-        treasure_reward = max(0, treasure_gain)
-
-        # buff收集奖励
-        cur_collected_buff = int(env_info.get("collected_buff", 0))
-        buff_gain = cur_collected_buff - self.last_collected_buff
-        self.last_collected_buff = cur_collected_buff
-
-        buff_reward = max(0, buff_gain)
-
         # 闪现释放奖励
         flash_reward = 0.0
         flash_count = env_info.get("flash_count", 0)
         if (flash_count - self.last_flash_count) > 0:
-            flash_reward = los_break_reward + 0.5 * monster_dist_reward + 0.5 * treasure_dist_reward + 0.1 * buff_dist_reward
+            flash_reward = los_break_reward + 0.5 * monster_dist_reward
         self.last_flash_count = flash_count
 
         # ABB 停留惩罚：若最近若干帧一直困在一个小范围内，则惩罚
         cur_hero_pos = reward_feats.get("hero_pos")
         abb_penalty = self._compute_abb_penalty(cur_hero_pos)
 
-        if reward_feats["progress_feats"][2] > 0 and reward_feats["progress_feats"][3] > 0: # time before second monseter appears and monster speedup
-            # 早期：鼓励探索和拿宝箱
-            treasure_phase_weight = 1.80
-            survive_phase_weight = 0.90
-        else:
-            # 后期：怪物加速后，生存优先
-            treasure_phase_weight = 0.90
-            survive_phase_weight = 1.80
+        survive_phase_weight = 1.00
 
         # final step reward vector
         dist_shaping_norm_weight = 12.8
@@ -853,10 +711,6 @@ class Preprocessor:
             0.02 * survive_phase_weight,
             3.50 * dist_shaping_norm_weight * monster_dist_reward,
             0.50 * los_break_reward,
-            5.00 * treasure_phase_weight * treasure_reward,
-            0.25 * treasure_phase_weight * dist_shaping_norm_weight * treasure_dist_reward,
-            0.35 * buff_reward,
-            0.05 * dist_shaping_norm_weight * buff_dist_reward,
             0.25 * flash_reward,
             1.00 * abb_penalty,
         ]
