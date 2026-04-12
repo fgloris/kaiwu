@@ -49,7 +49,7 @@ class Algorithm:
         """
         vector_obs = torch.stack([f.vector_obs for f in list_sample_data]).to(self.device)
         map_obs = torch.stack([f.map_obs for f in list_sample_data]).to(self.device)
-        map_obs = map_obs.view(-1, 2, 36, 36)
+        map_obs = map_obs.view(-1, 3, 36, 36)
         legal_action = torch.stack([f.legal_action for f in list_sample_data]).to(self.device)
         act = torch.stack([f.act for f in list_sample_data]).to(self.device).view(-1, 1)
         old_prob = torch.stack([f.prob for f in list_sample_data]).to(self.device)

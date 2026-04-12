@@ -27,16 +27,18 @@ MAX_FLASH_CD = 2000.0
 # Max buff duration / buff最大持续时间
 MAX_BUFF_DURATION = 50.0
 
-# 角度转向量特征
-DIR8_TO_VEC = {
-    0: (1.0, 0.0),
-    1: (1/np.sqrt(2), -1/np.sqrt(2)),
-    2: (0.0, -1.0),
-    3: (-1/np.sqrt(2), -1/np.sqrt(2)),
-    4: (-1.0, 0.0),
-    5: (-1/np.sqrt(2), 1/np.sqrt(2)),
-    6: (0.0, 1.0),
-    7: (1/np.sqrt(2), 1/np.sqrt(2)),
+# 官方 monster / organ relative direction 映射
+# 0=重叠/无效，1=东，2=东北，3=北，4=西北，5=西，6=西南，7=南，8=东南
+DIR9_TO_VEC = {
+    0: (0.0, 0.0),
+    1: (1.0, 0.0),                          # 东
+    2: (1 / np.sqrt(2), -1 / np.sqrt(2)),   # 东北
+    3: (0.0, -1.0),                         # 北
+    4: (-1 / np.sqrt(2), -1 / np.sqrt(2)),  # 西北
+    5: (-1.0, 0.0),                         # 西
+    6: (-1 / np.sqrt(2), 1 / np.sqrt(2)),   # 西南
+    7: (0.0, 1.0),                          # 南
+    8: (1 / np.sqrt(2), 1 / np.sqrt(2)),    # 东南
 }
 
 def _norm(v, v_max, v_min=0.0):
@@ -76,6 +78,48 @@ def _bucketize_left(x, num_bins, x_min=0.0, x_max=1.0):
     idx = np.clip(idx, 0, num_bins - 1)
 
     return x_min + idx * step
+
+def _distance_bucket_to_radius(dist_bucket):
+    """
+    将 hero_l2_distance 桶编号(0~5)估算成一个代表距离。
+    桶定义：
+        0=[0,30), 1=[30,60), 2=[60,90), 3=[90,120), 4=[120,150), 5=[150,180)
+    这里取各桶中点作为估计半径，更稳一些。
+    """
+    dist_bucket = int(np.clip(dist_bucket, 0, 5))
+    bucket_mid = {
+        0: 15.0,
+        1: 45.0,
+        2: 75.0,
+        3: 105.0,
+        4: 135.0,
+        5: 165.0,
+    }
+    return bucket_mid[dist_bucket]
+
+def _estimate_monster_pos(hero_x, hero_z, monster):
+    """
+    返回怪物估计位置 (mx, mz)，整数网格坐标。
+    规则：
+    - 视野内：直接用精确 pos
+    - 视野外：用 hero_relative_direction + hero_l2_distance 估算
+    """
+    is_in_view = int(monster.get("is_in_view", 0))
+
+    if is_in_view and ("pos" in monster) and (monster["pos"] is not None):
+        mx = int(monster["pos"]["x"])
+        mz = int(monster["pos"]["z"])
+        return mx, mz
+
+    dir_idx = int(monster.get("hero_relative_direction", 0))
+    dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
+
+    dist_bucket = int(monster.get("hero_l2_distance", 5))
+    est_radius = _distance_bucket_to_radius(dist_bucket)
+
+    mx = int(round(hero_x + dir_x * est_radius))
+    mz = int(round(hero_z + dir_z * est_radius))
+    return mx, mz
 
 class Preprocessor:
     def __init__(self):
@@ -181,8 +225,8 @@ class Preprocessor:
                 rel_z = 0.0
 
                 # 先给默认值：视野外时只保留粗信息
-                dir_idx = int(m.get("hero_relative_direction", 0)) % 8
-                dir_x, dir_z = DIR8_TO_VEC[dir_idx]
+                dir_idx = int(m.get("hero_relative_direction", 0))
+                dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
 
                 dist_norm = _norm(m.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET)
 
@@ -196,12 +240,18 @@ class Preprocessor:
                     rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
 
                     raw_dist = np.sqrt(dx * dx + dz * dz)
-                    # dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
+                    dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 9)
 
                     # 视野内时，用连续方向覆盖离散方向
                     if raw_dist > 1e-6:
                         dir_x = dx / raw_dist
                         dir_z = dz / raw_dist
+                else:
+                    est_mx, est_mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
+                    dx = float(est_mx - hero_pos["x"])
+                    dz = float(est_mz - hero_pos["z"])
+                    rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
+                    rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
 
                 monster_feats.append(
                     np.array(
@@ -260,8 +310,8 @@ class Preprocessor:
                 dir_x = dx / raw_dist
                 dir_z = dz / raw_dist
             else:
-                dir_idx = int(organ.get("hero_relative_direction", 0)) % 8
-                dir_x, dir_z = DIR8_TO_VEC[dir_idx]
+                dir_idx = int(m.get("hero_relative_direction", 0))
+                dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
 
             treasure_feat[i * 5 : i * 5 + 5] = np.array(
                 [rel_x, rel_z, dist_norm, dir_x, dir_z],
@@ -281,8 +331,8 @@ class Preprocessor:
                 dir_x = dx / raw_dist
                 dir_z = dz / raw_dist
             else:
-                dir_idx = int(organ.get("hero_relative_direction", 0)) % 8
-                dir_x, dir_z = DIR8_TO_VEC[dir_idx]
+                dir_idx = int(m.get("hero_relative_direction", 0))
+                dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
 
             buff_feat[i * 5 : i * 5 + 5] = np.array(
                 [rel_x, rel_z, dist_norm, dir_x, dir_z],
@@ -292,7 +342,7 @@ class Preprocessor:
         if map_info is not None:
             x0, x1, y0, y1 = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
 
-        map_feat = np.zeros((2, 36, 36), dtype=np.float32)
+        map_feat = np.zeros((3, 36, 36), dtype=np.float32)
 
         crop_size = 36
         half = crop_size // 2  # 18
@@ -309,6 +359,20 @@ class Preprocessor:
                 if 0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT:
                     map_feat[0, i, j] = float(self.passable_map[gx, gy])
                     map_feat[1, i, j] = float(self.visibility_map[gx, gy])
+
+        # 第三层：monster mask
+        # 规则：
+        # - 视野内：用精确位置
+        # - 视野外但怪物存在：用粗方向 + 桶距离估计位置
+        # - 落在 36x36 crop 内则置 1
+        for m in monsters[:2]:
+            mx, mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
+
+            if 0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT:
+                local_i = mx - gx0
+                local_j = mz - gy0
+                if 0 <= local_i < crop_size and 0 <= local_j < crop_size:
+                    map_feat[2, local_i, local_j] = 1.0
 
         # 合法动作掩码 (8D)
         legal_action = [1] * 16

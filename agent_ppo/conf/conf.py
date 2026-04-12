@@ -25,7 +25,7 @@ class Config:
     VECTOR_FEATURE_LEN = sum(VECTOR_FEATURES)
 
     # 局部地图大小：完整 36x36
-    MAP_CHANNEL = 2
+    MAP_CHANNEL = 3
     MAP_SIZE = 36
 
     # 兼容 SampleData 里的 obs 维度定义

@@ -142,7 +142,7 @@ class Agent(BaseAgent):
 
         vector_tensor = torch.tensor(np.array([vector_feature]), dtype=torch.float32).to(self.device)
         map_tensor = torch.tensor(np.array([map_feature]), dtype=torch.float32).to(self.device)
-        map_tensor = map_tensor.view(-1, 2, 36, 36)
+        map_tensor = map_tensor.view(-1, 3, 36, 36)
 
         with torch.no_grad():
             logits, value = self.model(vector_tensor, map_tensor, inference=True)
