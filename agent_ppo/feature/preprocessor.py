@@ -174,6 +174,8 @@ class Preprocessor:
 
         self.last_monster_dist_norm_1 = -1.0
         self.last_monster_dist_norm_2 = -1.0
+        self.last_monster_blocked_1 = False
+        self.last_monster_blocked_2 = False
 
         self.last_total_score = 0.0
         self.last_treasure_collected = 0
@@ -436,6 +438,56 @@ class Preprocessor:
                 move_scores.append(float(np.clip(score, 0.0, 1.0)))
 
         return np.asarray(move_scores, dtype=np.float32)
+    
+        def _line_blocked_by_known_wall(self, hero_pos, monster_feat, step_size=0.5):
+            """
+            检查 hero 与 monster 连线上是否存在已知障碍物。
+            规则：
+            - monster_feat 里已有 rel_x / rel_z，可直接还原 monster 估计位置
+            - 连线上若遇到 visibility=1 且 passable=0，则视为被墙阻挡
+            - 若途中遇到未知区 visibility=0，则停止检查并按“不阻挡”处理
+            """
+            if hero_pos is None or monster_feat is None:
+                return False
+
+            hero_x = float(hero_pos[0])
+            hero_z = float(hero_pos[1])
+
+            rel_x = float(monster_feat[2]) * MAP_SIZE
+            rel_z = float(monster_feat[3]) * MAP_SIZE
+
+            monster_x = hero_x + rel_x
+            monster_z = hero_z + rel_z
+
+            dx = monster_x - hero_x
+            dz = monster_z - hero_z
+            dist = float(np.hypot(dx, dz))
+
+            if dist < 1e-6:
+                return False
+
+            ux = dx / dist
+            uz = dz / dist
+
+            t = step_size
+            while t < dist:
+                x = int(round(hero_x + ux * t))
+                z = int(round(hero_z + uz * t))
+
+                if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
+                    return True
+
+                # 未知区域：不继续往后判，避免误杀 reward
+                if self.visibility_map[x, z] == 0:
+                    return False
+
+                # 已知墙
+                if self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0:
+                    return True
+
+                t += step_size
+
+            return False
 
     def _compute_abb_penalty(self, cur_hero_pos):
         """ABB penalty: punish staying inside a tiny axis-aligned box for too long.
@@ -732,16 +784,58 @@ class Preprocessor:
         self.last_total_score = cur_total_score
         
         # 怪物 dist shaping
-        # 防止首帧的错误 reward
-
+        # 规则：
+        # - 用 monster_feats[..., 4] 作为 dist_norm
+        # - 如果 hero 和 monster 连线上有已知墙，则该怪物 dist shaping 记为 0
+        # - 只对 is_in_view 的怪物更新 last_monster_dist_norm，避免视野外估计值抖动过大
         monster_dist_reward = 0.0
-        if self.last_monster_dist_norm_1 >= 0  and self.last_monster_dist_norm_2 >= 0:
-            monster_dist_reward = \
-                ( reward_feats['monster_feats'][0][4] - self.last_monster_dist_norm_1) + \
-                0.2 * (reward_feats['monster_feats'][1][4] - self.last_monster_dist_norm_2)
-            
-        self.last_monster_dist_norm_1 = reward_feats['monster_feats'][0][4]
-        self.last_monster_dist_norm_2 = reward_feats['monster_feats'][1][4]
+        cur_hero_pos = reward_feats.get("hero_pos")
+
+        m1 = reward_feats['monster_feats'][0]
+        m2 = reward_feats['monster_feats'][1]
+        r1 = 0.0
+        r2 = 0.0
+
+        # monster 1
+        if self.last_monster_dist_norm_1 >= 0:
+            cur_dist_1 = float(m1[4])   # dist_norm
+            r1 = cur_dist_1 - self.last_monster_dist_norm_1
+            # 若连线被已知墙阻挡，则该怪物的距离 shaping 截断为 0
+            if self._line_blocked_by_known_wall(cur_hero_pos, m1):
+                r1 = 0.0
+        # monster 2
+        if self.last_monster_dist_norm_2 >= 0:
+            cur_dist_2 = float(m2[4])   # dist_norm
+            r2 = cur_dist_2 - self.last_monster_dist_norm_2
+            if self._line_blocked_by_known_wall(cur_hero_pos, m2):
+                r2 = 0.0
+
+        # 只在怪物可见时更新 last distance，避免视野外估计距离抖动
+        if m1[0] > 1e-6:
+            self.last_monster_dist_norm_1 = float(m1[4])
+        if m2[0] > 1e-6:
+            self.last_monster_dist_norm_2 = float(m2[4])
+
+        # 稀疏奖励：如果 hero-monster 连线从“无遮挡”变成“有隔断”，给一次性大奖励
+        los_break_reward = 0.0
+        cur_blocked_1 = False
+        cur_blocked_2 = False
+
+        # 只对视野内怪物判这个事件，更稳
+        if m1[0] > 1e-6:
+            cur_blocked_1 = self._line_blocked_by_known_wall(cur_hero_pos, m1)
+            if (not self.last_monster_blocked_1) and cur_blocked_1:
+                los_break_reward += 1.0
+
+        if m2[0] > 1e-6:
+            cur_blocked_2 = self._line_blocked_by_known_wall(cur_hero_pos, m2)
+            if (not self.last_monster_blocked_2) and cur_blocked_2:
+                los_break_reward += 0.5
+
+        self.last_monster_blocked_1 = cur_blocked_1
+        self.last_monster_blocked_2 = cur_blocked_2
+
+        monster_dist_reward = r1 + 0.2 * r2 + los_break_reward
 
         # buff和宝箱 distance shaping
         # 靠近奖励但远离不惩罚
