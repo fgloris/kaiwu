@@ -130,8 +130,72 @@ def _paint_square(mask, center_i, center_j, radius=1, value=1.0):
             if 0 <= ii < h and 0 <= jj < w:
                 mask[ii, jj] = value
 
+def _expand_passable_edges_in_unknown(passable_crop, visible_crop, fill_value=0.5):
+    """
+    对 25x25 已知区域的四条边做向外延展，只在不可见区域(visible==0)填充 fill_value。
+    
+    参数:
+        passable_crop: shape [36, 36], 当前 map_feat[0]
+        visible_crop:  shape [36, 36], 当前 map_feat[1]
+    返回:
+        修改后的 passable_crop（原地修改并返回）
+    """
+
+    h, w = passable_crop.shape
+    assert h == 36 and w == 36
+    start = (36 - LOCAL_MAP_SIZE) // 2   # 5
+    end = start + LOCAL_MAP_SIZE         # 30
+
+    # 已知区域在 [5:30, 5:30]
+    top = start
+    bottom = end - 1
+    left = start
+    right = end - 1
+
+    # 1) 左边缘向左扩展
+    for r in range(start, end):
+        if passable_crop[r, left] > 0.0:
+            for c in range(left - 1, -1, -1):
+                if visible_crop[r, c] <= 0.0:
+                    passable_crop[r, c] = max(passable_crop[r, c], fill_value)
+
+    # 2) 右边缘向右扩展
+    for r in range(start, end):
+        if passable_crop[r, right] > 0.0:
+            for c in range(right + 1, w):
+                if visible_crop[r, c] <= 0.0:
+                    passable_crop[r, c] = max(passable_crop[r, c], fill_value)
+
+    # 3) 上边缘向上扩展
+    for c in range(start, end):
+        if passable_crop[top, c] > 0.0:
+            for r in range(top - 1, -1, -1):
+                if visible_crop[r, c] <= 0.0:
+                    passable_crop[r, c] = max(passable_crop[r, c], fill_value)
+
+    # 4) 下边缘向下扩展
+    for c in range(start, end):
+        if passable_crop[bottom, c] > 0.0:
+            for r in range(bottom + 1, h):
+                if visible_crop[r, c] <= 0.0:
+                    passable_crop[r, c] = max(passable_crop[r, c], fill_value)
+
+    return passable_crop
+
+def _log_gray_map_as_binary(logger, gray_map, title="map36"):
+    """
+    将 36x36 灰度图压成单个 01 字符串，并一次 warning 输出。
+    规则：>0 的都记为 1，因此 0.5 也会记成 1。
+    """
+    arr = np.asarray(gray_map)
+    assert arr.shape == (36, 36), f"expect (36,36), got {arr.shape}"
+
+    s = "".join("1" if v > 0 else "0" for v in arr.reshape(-1))
+    logger.warning(f"[{title}]{s}")
+
 class Preprocessor:
-    def __init__(self):
+    def __init__(self, logger=None):
+        self.logger = logger
         self.reset()
 
     def reset(self):
@@ -368,6 +432,11 @@ class Preprocessor:
                 if 0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT:
                     map_feat[0, i, j] = float(self.passable_map[gx, gy])
                     map_feat[1, i, j] = float(self.visibility_map[gx, gy])
+        
+        _log_gray_map_as_binary(self.logger, map_feat[0], title=f"before:{self.step_no}")
+        _log_gray_map_as_binary(self.logger, map_feat[1], title=f"vis:{self.step_no}")
+        map_feat[0] = _expand_passable_edges_in_unknown(map_feat[0], map_feat[1], fill_value=0.5)
+        _log_gray_map_as_binary(self.logger, map_feat[0], title=f"after:{self.step_no}")
 
         # 第三层：monster mask
         # 规则：
