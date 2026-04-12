@@ -17,6 +17,7 @@ MAP_SIZE = 128.0
 MAP_SIZE_INT = 128
 LOCAL_MAP_SIZE = 21
 LOCAL_MAP_HALF = 10
+VIEW_MAP_SIZE = 36
 
 # Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 5.0
@@ -142,65 +143,13 @@ def _paint_square(mask, center_i, center_j, radius=1, value=1.0):
             if 0 <= ii < h and 0 <= jj < w:
                 mask[ii, jj] = value
 
-def _expand_passable_edges_in_unknown(passable_crop, visible_crop, fill_value=0.5):
-    """
-    对 25x25 已知区域的四条边做向外延展，只在不可见区域(visible==0)填充 fill_value。
-    
-    参数:
-        passable_crop: shape [36, 36], 当前 map_feat[0]
-        visible_crop:  shape [36, 36], 当前 map_feat[1]
-    返回:
-        修改后的 passable_crop（原地修改并返回）
-    """
-
-    h, w = passable_crop.shape
-    assert h == 36 and w == 36
-    start = (36 - LOCAL_MAP_SIZE) // 2   # 5
-    end = start + LOCAL_MAP_SIZE         # 30
-
-    # 已知区域在 [5:30, 5:30]
-    top = start
-    bottom = end - 1
-    left = start
-    right = end - 1
-
-    # 1) 左边缘向左扩展
-    for r in range(start, end):
-        if passable_crop[r, left] > 0.0:
-            for c in range(left - 1, -1, -1):
-                if visible_crop[r, c] <= 0.0:
-                    passable_crop[r, c] = max(passable_crop[r, c], fill_value)
-
-    # 2) 右边缘向右扩展
-    for r in range(start, end):
-        if passable_crop[r, right] > 0.0:
-            for c in range(right + 1, w):
-                if visible_crop[r, c] <= 0.0:
-                    passable_crop[r, c] = max(passable_crop[r, c], fill_value)
-
-    # 3) 上边缘向上扩展
-    for c in range(start, end):
-        if passable_crop[top, c] > 0.0:
-            for r in range(top - 1, -1, -1):
-                if visible_crop[r, c] <= 0.0:
-                    passable_crop[r, c] = max(passable_crop[r, c], fill_value)
-
-    # 4) 下边缘向下扩展
-    for c in range(start, end):
-        if passable_crop[bottom, c] > 0.0:
-            for r in range(bottom + 1, h):
-                if visible_crop[r, c] <= 0.0:
-                    passable_crop[r, c] = max(passable_crop[r, c], fill_value)
-
-    return passable_crop
-
 def _log_gray_map_as_binary(logger, gray_map, title="map36"):
     """
     将 36x36 灰度图压成单个 01 字符串，并一次 warning 输出。
     规则：>0 的都记为 1，因此 0.5 也会记成 1。
     """
     arr = np.asarray(gray_map)
-    assert arr.shape == (36, 36), f"expect (36,36), got {arr.shape}"
+    assert arr.shape == (VIEW_MAP_SIZE, VIEW_MAP_SIZE), f"expect ({VIEW_MAP_SIZE},{VIEW_MAP_SIZE}), got {arr.shape}"
 
     s = "".join("1" if v > 0 else "0" for v in arr.reshape(-1))
     logger.warning(f"[{title}]{s}")
@@ -282,19 +231,14 @@ class Preprocessor:
             return False
         return bool(self.passable_map[x, z] > 0)
 
-    def _open_length(self, hero_x, hero_z, dx, dz, max_len=6):
+    def _open_length(self, hero_x, hero_z, dx, dz, max_len=int(VIEW_MAP_SIZE*0.707)):
         """
-        从英雄当前位置沿 (dx, dz) 方向，统计连续可通行长度。
+        从当前位置沿 (dx, dz) 方向，统计连续可通行格数。
         """
-        hero_x = int(hero_x)
-        hero_z = int(hero_z)
-        dx = int(dx)
-        dz = int(dz)
-
         open_len = 0
-        for step in range(1, int(max_len) + 1):
-            nx = hero_x + dx * step
-            nz = hero_z + dz * step
+        while open_len <= max_len:
+            nx = round(hero_x + dx * open_len)
+            nz = round(hero_z + dz * open_len)
             if not self._is_global_passable(nx, nz):
                 break
             open_len += 1
@@ -350,6 +294,8 @@ class Preprocessor:
         """Compute 8-direction flash safety.
 
         计算 8 个闪现方向的安全性特征。
+        若某个方向的闪现路径中穿过了障碍物，并且最终能落到合法点，
+        则该方向 safety 直接给满 1.0。
         """
         hero_x = int(hero_x)
         hero_z = int(hero_z)
@@ -359,6 +305,20 @@ class Preprocessor:
             fx, fz, ok = self._flash_landing_offset(hero_x, hero_z, dx, dz)
             if not ok:
                 flash_scores.append(0.0)
+                continue
+
+            landed_step = int(max(abs(fx), abs(fz)))
+            crossed_obstacle = 0
+            for step in range(1, landed_step):
+                px = hero_x + dx * step
+                pz = hero_z + dz * step
+                if not self._is_global_passable(px, pz):
+                    crossed_obstacle += 1
+                    if crossed_obstacle > 2:
+                        break
+
+            if crossed_obstacle:
+                flash_scores.append(1.0)
                 continue
 
             nx = hero_x + fx
@@ -432,7 +392,7 @@ class Preprocessor:
                     rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
 
                     raw_dist = np.sqrt(dx * dx + dz * dz)
-                    dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 9)
+                    dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 10)
 
                     # 视野内时，用连续方向覆盖离散方向
                     if raw_dist > 1e-6:
@@ -534,9 +494,9 @@ class Preprocessor:
         if map_info is not None:
             x0, x1, y0, y1 = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
 
-        map_feat = np.zeros((3, 36, 36), dtype=np.float32)
+        map_feat = np.zeros((3, VIEW_MAP_SIZE, VIEW_MAP_SIZE), dtype=np.float32)
 
-        crop_size = 36
+        crop_size = VIEW_MAP_SIZE
         half = crop_size // 2  # 18
 
         gx0 = int(hero_pos['x'] - half)
@@ -739,7 +699,7 @@ class Preprocessor:
         reward_vector = [
             0.30 * score_gain,
             survive_phase_weight * 0.02,
-            0.35 * dist_shaping_norm_weight * monster_dist_reward,
+            3.50 * dist_shaping_norm_weight * monster_dist_reward,
             5.00 * treasure_phase_weight * treasure_reward,
             0.25 * treasure_phase_weight * dist_shaping_norm_weight * treasure_dist_reward,
             0.35 * buff_reward,
