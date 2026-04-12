@@ -657,14 +657,14 @@ class Preprocessor:
         if self.last_monster_dist_norm_1 >= 0:
             cur_dist_1 = float(m1[4])   # dist_norm
             r1 = cur_dist_1 - self.last_monster_dist_norm_1
-            if self._line_blocked_by_known_wall(cur_hero_pos, m1):
-                r1 *= 0.1
+            #if self._line_blocked_by_known_wall(cur_hero_pos, m1):
+                #r1 *= 0.1
         # monster 2
         if self.last_monster_dist_norm_2 >= 0:
             cur_dist_2 = float(m2[4])   # dist_norm
             r2 = cur_dist_2 - self.last_monster_dist_norm_2
-            if self._line_blocked_by_known_wall(cur_hero_pos, m2):
-                r2 *= 0.1
+            #if self._line_blocked_by_known_wall(cur_hero_pos, m2):
+                #r2 *= 0.1
 
         self.last_monster_dist_norm_1 = float(m1[4])
         self.last_monster_dist_norm_2 = float(m2[4])
@@ -686,6 +686,8 @@ class Preprocessor:
             los_break_reward -= 1.0
         if self.last_monster_blocked_2 and (not cur_blocked_2):
             los_break_reward -= 1.0
+        
+        los_break_reward = 0.0
 
         self.last_monster_blocked_1 = cur_blocked_1
         self.last_monster_blocked_2 = cur_blocked_2
