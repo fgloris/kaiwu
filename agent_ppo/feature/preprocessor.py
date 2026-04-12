@@ -216,11 +216,11 @@ def _log_passable_map_and_topology(logger, gray_map, move_scores, reach_masks=No
         "move_scores": [round(float(x), 4) for x in move_scores],
     }
 
-    if reach_masks is not None:
-        payload["reach_masks"] = [
-            "".join("1" if v > 0 else "0" for v in np.asarray(mask).reshape(-1))
-            for mask in reach_masks
-        ]
+    #if reach_masks is not None:
+    #    payload["reach_masks"] = [
+    #        "".join("1" if v > 0 else "0" for v in np.asarray(mask).reshape(-1))
+    #        for mask in reach_masks
+    #    ]
 
     logger.warning(f"[{title}]{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}")
 
@@ -662,14 +662,14 @@ class Preprocessor:
             return_debug=True,
         )
 
-        # _log_passable_map_and_topology(
-        #     self.logger,
-        #     map_feat[0],
-        #     move_safety_feat,
-        #     reach_masks=_reach_masks36,
-        #     step_no=self.step_no,
-        #     title="move_topology",
-        # )
+        _log_passable_map_and_topology(
+            self.logger,
+            map_feat[0],
+            move_safety_feat,
+            reach_masks=_reach_masks36,
+            step_no=self.step_no,
+            title="move_topology",
+        )
 
         # 合法动作掩码 (16D)，仅用于 action masking，不再直接拼入 observation 向量
         legal_action = [1] * 16
