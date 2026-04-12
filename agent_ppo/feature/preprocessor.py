@@ -276,53 +276,6 @@ class Preprocessor:
             if self._is_global_passable(nx, nz):
                 return dx * step, dz * step, True
         return 0, 0, False
-
-    def _flash_safety(self, hero_x, hero_z, monster_positions):
-        """Compute 8-direction flash safety.
-
-        计算 8 个闪现方向的安全性特征。
-        若某个方向的闪现路径中穿过了障碍物，并且最终能落到合法点，
-        则该方向 safety 直接给满 1.0。
-        """
-        hero_x = int(hero_x)
-        hero_z = int(hero_z)
-        flash_scores = []
-
-        for dx, dz in DIR8:
-            fx, fz, ok = self._flash_landing_offset(hero_x, hero_z, dx, dz)
-            if not ok:
-                flash_scores.append(0.0)
-                continue
-
-            landed_step = int(max(abs(fx), abs(fz)))
-            crossed_obstacle = 0
-            for step in range(1, landed_step):
-                px = hero_x + dx * step
-                pz = hero_z + dz * step
-                if not self._is_global_passable(px, pz):
-                    crossed_obstacle += 1
-                    if crossed_obstacle > 2:
-                        break
-
-            if crossed_obstacle:
-                flash_scores.append(1.0)
-                continue
-
-            nx = hero_x + fx
-            nz = hero_z + fz
-
-            min_dist = min((np.hypot(nx - mx, nz - mz) for mx, mz in monster_positions), default=80.0)
-            open_len = self._open_length(nx, nz, int(np.sign(fx)), int(np.sign(fz)), max_len=6)
-            distance_bonus = min(abs(fx) + abs(fz), 12.0) / 12.0
-
-            score = (
-                0.60 * float(np.clip(min_dist / 45.0, 0.0, 1.0))
-                + 0.20 * float(open_len / 6.0)
-                + 0.20 * float(distance_bonus)
-            )
-            flash_scores.append(float(np.clip(score, 0.0, 1.0)))
-
-        return np.asarray(flash_scores, dtype=np.float32)
     
     def _is_known_wall(self, x, z):
         """
@@ -476,15 +429,9 @@ class Preprocessor:
 
             if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
                 return True
-
-            # 未知区域：不继续往后判，避免误杀 reward
-            if self.visibility_map[x, z] == 0:
-                return False
-
             # 已知墙
             if self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0:
                 return True
-
             t += step_size
 
         return False
@@ -715,7 +662,6 @@ class Preprocessor:
                 monster_positions.append((mx, mz))
 
         move_safety_feat = self._move_safety(hero_pos["x"], hero_pos["z"], monster_positions)
-        flash_safety_feat = self._flash_safety(hero_pos["x"], hero_pos["z"], monster_positions)
 
         # 合法动作掩码 (16D)，仅用于 action masking，不再直接拼入 observation 向量
         legal_action = [1] * 16
@@ -752,7 +698,6 @@ class Preprocessor:
                 treasure_feat,
                 buff_feat,
                 move_safety_feat,
-                flash_safety_feat,
                 progress_feat,
             ]
         )
@@ -765,8 +710,6 @@ class Preprocessor:
             "buff_feats": buff_feat,
             "buff_feats_available": len(buffs),
             "progress_feats": progress_feat,
-            "move_safety_feat": move_safety_feat,
-            "flash_safety_feat": flash_safety_feat,
             "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
             "prev_hero_pos": self.prev_hero_pos,
             "last_action": int(last_action),
@@ -883,7 +826,7 @@ class Preprocessor:
         flash_reward = 0.0
         flash_count = env_info.get("flash_count", 0)
         if (flash_count - self.last_flash_count) > 0:
-            flash_reward = 0.5 * monster_dist_reward + 0.5 * treasure_dist_reward + 0.1 * buff_dist_reward
+            flash_reward = los_break_reward + 0.5 * monster_dist_reward + 0.5 * treasure_dist_reward + 0.1 * buff_dist_reward
         self.last_flash_count = flash_count
 
         # ABB 停留惩罚：若最近若干帧一直困在一个小范围内，则惩罚

@@ -20,7 +20,6 @@ class Config:
         10,   # treasures
         10,   # buffs
         8,   # move safety
-        8,   # flash safety
         4,   # progress
     ]
     VECTOR_FEATURE_LEN = sum(VECTOR_FEATURES)
