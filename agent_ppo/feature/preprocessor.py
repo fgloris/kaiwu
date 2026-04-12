@@ -690,6 +690,11 @@ class Preprocessor:
         self.last_monster_blocked_1 = cur_blocked_1
         self.last_monster_blocked_2 = cur_blocked_2
 
+        # 1.若怪物在视野外，让模型跑得更远一点。                            --> 通过 monster dist shaping? 这个足以做到吗？
+        # 2.若怪物在视野内且附近有弯道，让模型尽快将其拉脱视野。             --> 加一点视野脱离奖励？monster dist shaping?
+        # 3.尽量不要撞墙。1.不要撞侧面的墙。2.不要走进死胡同。              --> 计算路径方向？
+        # 4.不要原地打转。                                               --> ABB惩罚？好像做不到。方向一致性惩罚？
+        
         # 闪现释放奖励
         flash_reward = 0.0
         flash_count = env_info.get("flash_count", 0)
