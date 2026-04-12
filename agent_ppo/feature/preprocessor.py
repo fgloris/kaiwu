@@ -439,55 +439,55 @@ class Preprocessor:
 
         return np.asarray(move_scores, dtype=np.float32)
     
-        def _line_blocked_by_known_wall(self, hero_pos, monster_feat, step_size=0.5):
-            """
-            检查 hero 与 monster 连线上是否存在已知障碍物。
-            规则：
-            - monster_feat 里已有 rel_x / rel_z，可直接还原 monster 估计位置
-            - 连线上若遇到 visibility=1 且 passable=0，则视为被墙阻挡
-            - 若途中遇到未知区 visibility=0，则停止检查并按“不阻挡”处理
-            """
-            if hero_pos is None or monster_feat is None:
-                return False
-
-            hero_x = float(hero_pos[0])
-            hero_z = float(hero_pos[1])
-
-            rel_x = float(monster_feat[2]) * MAP_SIZE
-            rel_z = float(monster_feat[3]) * MAP_SIZE
-
-            monster_x = hero_x + rel_x
-            monster_z = hero_z + rel_z
-
-            dx = monster_x - hero_x
-            dz = monster_z - hero_z
-            dist = float(np.hypot(dx, dz))
-
-            if dist < 1e-6:
-                return False
-
-            ux = dx / dist
-            uz = dz / dist
-
-            t = step_size
-            while t < dist:
-                x = int(round(hero_x + ux * t))
-                z = int(round(hero_z + uz * t))
-
-                if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
-                    return True
-
-                # 未知区域：不继续往后判，避免误杀 reward
-                if self.visibility_map[x, z] == 0:
-                    return False
-
-                # 已知墙
-                if self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0:
-                    return True
-
-                t += step_size
-
+    def _line_blocked_by_known_wall(self, hero_pos, monster_feat, step_size=0.5):
+        """
+        检查 hero 与 monster 连线上是否存在已知障碍物。
+        规则：
+        - monster_feat 里已有 rel_x / rel_z，可直接还原 monster 估计位置
+        - 连线上若遇到 visibility=1 且 passable=0，则视为被墙阻挡
+        - 若途中遇到未知区 visibility=0，则停止检查并按“不阻挡”处理
+        """
+        if hero_pos is None or monster_feat is None:
             return False
+
+        hero_x = float(hero_pos[0])
+        hero_z = float(hero_pos[1])
+
+        rel_x = float(monster_feat[2]) * MAP_SIZE
+        rel_z = float(monster_feat[3]) * MAP_SIZE
+
+        monster_x = hero_x + rel_x
+        monster_z = hero_z + rel_z
+
+        dx = monster_x - hero_x
+        dz = monster_z - hero_z
+        dist = float(np.hypot(dx, dz))
+
+        if dist < 1e-6:
+            return False
+
+        ux = dx / dist
+        uz = dz / dist
+
+        t = step_size
+        while t < dist:
+            x = int(round(hero_x + ux * t))
+            z = int(round(hero_z + uz * t))
+
+            if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
+                return True
+
+            # 未知区域：不继续往后判，避免误杀 reward
+            if self.visibility_map[x, z] == 0:
+                return False
+
+            # 已知墙
+            if self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0:
+                return True
+
+            t += step_size
+
+        return False
 
     def _compute_abb_penalty(self, cur_hero_pos):
         """ABB penalty: punish staying inside a tiny axis-aligned box for too long.
