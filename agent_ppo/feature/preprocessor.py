@@ -747,15 +747,14 @@ class Preprocessor:
         if self.last_monster_dist_norm_1 >= 0:
             cur_dist_1 = float(m1[4])   # dist_norm
             r1 = cur_dist_1 - self.last_monster_dist_norm_1
-            # 若连线被已知墙阻挡，则该怪物的距离 shaping 截断为 0
             if self._line_blocked_by_known_wall(cur_hero_pos, m1):
-                r1 = 0.0
+                r1 *= 0.1
         # monster 2
         if self.last_monster_dist_norm_2 >= 0:
             cur_dist_2 = float(m2[4])   # dist_norm
             r2 = cur_dist_2 - self.last_monster_dist_norm_2
             if self._line_blocked_by_known_wall(cur_hero_pos, m2):
-                r2 = 0.0
+                r2 *= 0.1
 
         self.last_monster_dist_norm_1 = float(m1[4])
         self.last_monster_dist_norm_2 = float(m2[4])
