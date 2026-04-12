@@ -19,7 +19,8 @@ class Config:
         7,   # monster2
         10,   # treasures
         10,   # buffs
-        16,  # legal action
+        8,   # move safety
+        8,   # flash safety
         4,   # progress
     ]
     VECTOR_FEATURE_LEN = sum(VECTOR_FEATURES)

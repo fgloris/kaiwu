@@ -41,6 +41,18 @@ DIR9_TO_VEC = {
     8: (1 / np.sqrt(2), 1 / np.sqrt(2)),    # 东南
 }
 
+# 8方向（与 DIR9_TO_VEC 去掉 0 后保持一致）：东、东北、北、西北、西、西南、南、东南
+DIR8 = [
+    (1, 0),    # 东
+    (1, -1),   # 东北
+    (0, -1),   # 北
+    (-1, -1),  # 西北
+    (-1, 0),   # 西
+    (-1, 1),   # 西南
+    (0, 1),    # 南
+    (1, 1),    # 东南
+]
+
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
 
@@ -258,6 +270,113 @@ class Preprocessor:
 
         return gx0, gx1, gy0, gy1
 
+
+    def _is_global_passable(self, x, z):
+        """Check whether global memory marks (x, z) as passable.
+
+        检查全局记忆中的 (x, z) 是否可通行。
+        """
+        x = int(x)
+        z = int(z)
+        if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
+            return False
+        return bool(self.passable_map[x, z] > 0)
+
+    def _open_length(self, hero_x, hero_z, dx, dz, max_len=6):
+        """
+        从英雄当前位置沿 (dx, dz) 方向，统计连续可通行长度。
+        """
+        hero_x = int(hero_x)
+        hero_z = int(hero_z)
+        dx = int(dx)
+        dz = int(dz)
+
+        open_len = 0
+        for step in range(1, int(max_len) + 1):
+            nx = hero_x + dx * step
+            nz = hero_z + dz * step
+            if not self._is_global_passable(nx, nz):
+                break
+            open_len += 1
+        return open_len
+
+    def _flash_landing_offset(self, hero_x, hero_z, dx, dz):
+        """Find the farthest valid flash landing cell in the given direction.
+
+        在给定方向上，从远到近寻找最远的合法闪现落点。
+        返回: (offset_x, offset_z, ok)
+        """
+        hero_x = int(hero_x)
+        hero_z = int(hero_z)
+        dx = int(dx)
+        dz = int(dz)
+
+        diagonal = (dx != 0 and dz != 0)
+        max_dist = 8 if diagonal else 10
+
+        for step in range(max_dist, 0, -1):
+            nx = hero_x + dx * step
+            nz = hero_z + dz * step
+            if self._is_global_passable(nx, nz):
+                return dx * step, dz * step, True
+        return 0, 0, False
+
+    def _move_safety(self, hero_x, hero_z, monster_positions):
+        """Compute 8-direction move safety.
+
+        计算 8 个普通移动方向的安全性特征。
+        """
+        hero_x = int(hero_x)
+        hero_z = int(hero_z)
+        move_scores = []
+
+        for dx, dz in DIR8:
+            nx = hero_x + dx
+            nz = hero_z + dz
+
+            if not self._is_global_passable(nx, nz):
+                move_scores.append(0.0)
+                continue
+
+            min_dist = min((np.hypot(nx - mx, nz - mz) for mx, mz in monster_positions), default=60.0)
+            open_len = self._open_length(hero_x, hero_z, dx, dz, max_len=6)
+
+            score = 0.7 * float(np.clip(min_dist / 35.0, 0.0, 1.0)) + 0.3 * float(open_len / 6.0)
+            move_scores.append(float(np.clip(score, 0.0, 1.0)))
+
+        return np.asarray(move_scores, dtype=np.float32)
+
+    def _flash_safety(self, hero_x, hero_z, monster_positions):
+        """Compute 8-direction flash safety.
+
+        计算 8 个闪现方向的安全性特征。
+        """
+        hero_x = int(hero_x)
+        hero_z = int(hero_z)
+        flash_scores = []
+
+        for dx, dz in DIR8:
+            fx, fz, ok = self._flash_landing_offset(hero_x, hero_z, dx, dz)
+            if not ok:
+                flash_scores.append(0.0)
+                continue
+
+            nx = hero_x + fx
+            nz = hero_z + fz
+
+            min_dist = min((np.hypot(nx - mx, nz - mz) for mx, mz in monster_positions), default=80.0)
+            open_len = self._open_length(nx, nz, int(np.sign(fx)), int(np.sign(fz)), max_len=6)
+            distance_bonus = min(abs(fx) + abs(fz), 12.0) / 12.0
+
+            score = (
+                0.60 * float(np.clip(min_dist / 45.0, 0.0, 1.0))
+                + 0.20 * float(open_len / 6.0)
+                + 0.20 * float(distance_bonus)
+            )
+            flash_scores.append(float(np.clip(score, 0.0, 1.0)))
+
+        return np.asarray(flash_scores, dtype=np.float32)
+
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
 
@@ -450,9 +569,18 @@ class Preprocessor:
             center_i = mx - gx0
             center_j = mz - gy0
             _paint_square(map_feat[2], center_i, center_j, radius=1, value=1.0)
-            _paint_square(map_feat[0], center_i, center_j, radius=1, value=0.0)
 
-        # 合法动作掩码 (8D)
+        # 基于全局记忆 + 怪物估计位置，计算 move / flash safety
+        monster_positions = []
+        for m in monsters[:2]:
+            mx, mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
+            if 0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT:
+                monster_positions.append((mx, mz))
+
+        move_safety_feat = self._move_safety(hero_pos["x"], hero_pos["z"], monster_positions)
+        flash_safety_feat = self._flash_safety(hero_pos["x"], hero_pos["z"], monster_positions)
+
+        # 合法动作掩码 (16D)，仅用于 action masking，不再直接拼入 observation 向量
         legal_action = [1] * 16
         if isinstance(legal_act_raw, list) and legal_act_raw:
             if isinstance(legal_act_raw[0], bool):
@@ -475,6 +603,8 @@ class Preprocessor:
         progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, has_monster_speedup], dtype=np.float32)
 
         # Concatenate features / 拼接特征
+        # 这里用 move/flash safety 替换 legal_action 作为 observation 输入，
+        # 因此向量总维度保持不变：原先 16 维 legal_action -> 8+8 维 safety
         vector_feat = np.concatenate(
             [
                 hero_feat,
@@ -482,7 +612,8 @@ class Preprocessor:
                 monster_feats[1],
                 treasure_feat,
                 buff_feat,
-                np.array(legal_action, dtype=np.float32),
+                move_safety_feat,
+                flash_safety_feat,
                 progress_feat,
             ]
         )
@@ -495,6 +626,8 @@ class Preprocessor:
             "buff_feats": buff_feat,
             "buff_feats_available": len(buffs),
             "progress_feats": progress_feat,
+            "move_safety_feat": move_safety_feat,
+            "flash_safety_feat": flash_safety_feat,
             "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
             "prev_hero_pos": self.prev_hero_pos,
             "last_action": int(last_action),
