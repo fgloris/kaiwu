@@ -164,13 +164,12 @@ def _log_gray_map_as_binary(logger, gray_map, title="map36"):
     s = "".join("1" if v > 0 else "0" for v in arr.reshape(-1))
     logger.warning(f"[{title}]{s}")
 
-def _log_passable_map_and_rays(logger, gray_map, move_debug_infos, step_no=None, title="move_debug"):
+def _log_passable_map_and_rays(logger, gray_map, global_rays, move_scores, step_no=None, title="move_debug"):
     """
-    在同一个 logger.warning() 中打印：
-    1. 36x36 passable map（二值压平字符串）
-    2. 8个方向的 ray score / weight / 最终方向分数
-
-    输出格式是 JSON，方便后处理可视化。
+    精简日志：
+    1. map: 36x36 passable map 压平
+    2. rays: 全局 rays 的 [angle, score]
+    3. move_scores: 8个动作方向分数
     """
     if logger is None:
         return
@@ -181,12 +180,20 @@ def _log_passable_map_and_rays(logger, gray_map, move_debug_infos, step_no=None,
 
     map_bits = "".join("1" if v > 0 else "0" for v in arr.reshape(-1))
 
+    rays = []
+    for ray in global_rays:
+        rays.append([
+            int(round(float(ray["angle"]))),
+            round(float(ray["score"]), 4),
+        ])
+
+    move_scores_list = [round(float(x), 4) for x in move_scores]
+
     payload = {
-        "title": title,
-        "step_no": None if step_no is None else int(step_no),
-        "map_size": int(VIEW_MAP_SIZE),
-        "passable_map_bits": map_bits,
-        "actions": move_debug_infos,
+        "step": None if step_no is None else int(step_no),
+        "map": map_bits,
+        "rays": rays,
+        "move_scores": move_scores_list,
     }
 
     logger.warning(f"[{title}]{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}")
@@ -314,34 +321,36 @@ class Preprocessor:
             return False
         return bool(self.visibility_map[x, z] == 0)
 
-    def _ray_collision_score(self, start_x, start_z, angle_deg, max_len=18, step_size=1.0):
+    def _ray_collision_score(self, start_x, start_z, angle_deg, max_len=VIEW_MAP_SIZE/2, step_size=1.0):
         """
         从 (start_x, start_z) 朝 angle_deg 方向发射一条射线。
-        规则：
-        - 遇到 visibility=1 且 passable=0 -> 撞墙，返回 0
-        - 遇到 visibility=0 -> 停下，返回 1（未知，不判撞）
-        - 一直到 max_len 都没撞 -> 返回 1
+        - 若在已知区域内撞到墙，则 score = dist / max_len，越晚撞墙分越高
+        - 若遇到未知区域，则返回 1.0（未知区域不判危险）
+        - 若一直到 max_len 都没撞墙，则返回 1.0
+        - 若射线走出地图边界，则按“撞边界”处理，也返回 dist / max_len
         """
         theta = np.deg2rad(angle_deg)
         dx = np.cos(theta)
-        dz = -np.sin(theta)   # 与你 DIR9_TO_VEC 的 z 方向保持一致：北是负 z
+        dz = -np.sin(theta)   # 与 DIR9_TO_VEC 的 z 方向保持一致：北是负 z
 
         dist = step_size
         while dist <= max_len:
             x = int(round(start_x + dx * dist))
             z = int(round(start_z + dz * dist))
 
+            # 出界：按在该距离处碰壁处理
             if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
-                return 0.0
+                return float(np.clip(dist / max_len, 0.0, 1.0))
 
+            # 未知区域：不继续往前判，直接认为安全
             if self._is_unknown(x, z):
                 return 1.0
 
+            # 已知墙：按撞墙距离线性给分
             if self._is_known_wall(x, z):
-                return 0.0
+                return float(np.clip(dist / max_len, 0.0, 1.0))
 
             dist += step_size
-
         return 1.0
 
     def _angle_diff_deg(self, a, b):
@@ -362,94 +371,124 @@ class Preprocessor:
         if angle < 0:
             angle += 360
         return float(angle)
+    
+    def _compute_global_rays(self, start_x, start_z, max_len=18, step_size=1.0):
+        """
+        从同一个起点统一发射全局 rays（0,15,30,...,345），每根只算一次。
+        返回：
+            [
+                {"angle": 0.0, "score": 1.0},
+                {"angle": 15.0, "score": 1.0},
+                ...
+            ]
+        """
+        start_x = int(start_x)
+        start_z = int(start_z)
+
+        rays = []
+        for angle_deg in SCAN_ANGLES_DEG:
+            ray_score = self._ray_collision_score(
+                start_x=start_x,
+                start_z=start_z,
+                angle_deg=angle_deg,
+                max_len=max_len,
+                step_size=step_size,
+            )
+            rays.append({
+                "angle": float(angle_deg),
+                "score": float(ray_score),
+            })
+        return rays
+    
+    def _score_move_from_rays(self, move_angle, rays, angle_window=30.0):
+        """
+        用统一的一组全局 rays，对某个 move_angle 打分。
+        只看 ±angle_window 内的 rays，按角度差线性加权。
+        """
+        weighted_sum = 0.0
+        weight_total = 0.0
+        matched_rays = []
+
+        for ray in rays:
+            ray_angle = float(ray["angle"])
+            ray_score = float(ray["score"])
+
+            diff = self._angle_diff_deg(move_angle, ray_angle)
+            if diff > angle_window:
+                continue
+
+            weight = 1.0 - diff / angle_window
+
+            weighted_sum += weight * ray_score
+            weight_total += weight
+
+            matched_rays.append({
+                "angle": ray_angle,
+                "score": ray_score,
+            })
+
+        if weight_total <= 1e-6:
+            move_score = 0.0
+        else:
+            move_score = float(np.clip(weighted_sum / weight_total, 0.0, 1.0))
+
+        return move_score, matched_rays
 
     def _move_safety(self, hero_x, hero_z, monster_positions=None, return_debug=False):
         """
-        基于 24 条角度射线的 8 方向 move safety。
-        对每个动作方向：
+        基于一组全局 rays 的 8 方向 move safety。
+        1. 从 hero 当前位置统一发射一组全局 rays（0,15,...,345），每根只算一次
+        2. 对每个动作方向：
         - 若下一步不可走，score=0
-        - 否则从下一步落点出发，扫描 24 个方向
-        - 只统计与动作方向夹角在 ±30° 内的 rays
-        - 越接近动作方向中心，权重越高
-
-        return:
-            if return_debug == False:
-                move_scores
-            else:
-                move_scores, debug_infos
+        - 否则用该方向去匹配全局 rays 中 ±30° 内的那些 ray
+        - 按角度差加权聚合成该方向的 move score
         """
         hero_x = int(hero_x)
         hero_z = int(hero_z)
+
+        # 先统一计算一组全局 rays
+        global_rays = self._compute_global_rays(
+            start_x=hero_x,
+            start_z=hero_z,
+            max_len=18,
+            step_size=1.0,
+        )
+
         move_scores = []
         debug_infos = []
 
-        for action_idx, (dx, dz) in enumerate(DIR8):
+        for dx, dz in DIR8:
             nx = hero_x + dx
             nz = hero_z + dz
 
             action_debug = {
-                "action_idx": int(action_idx),
-                "dir": [int(dx), int(dz)],
-                "next_pos": [int(nx), int(nz)],
-                "passable": bool(self._is_global_passable(nx, nz)),
-                "move_angle": None,
                 "score": 0.0,
                 "rays": [],
             }
 
-            # 下一步本身不能走，直接不安全
+            # 下一步本身不能走，则该方向直接为 0
             if not self._is_global_passable(nx, nz):
                 move_scores.append(0.0)
                 debug_infos.append(action_debug)
                 continue
 
             move_angle = self._dir8_to_angle_deg(dx, dz)
-            action_debug["move_angle"] = float(move_angle)
+            move_score, matched_rays = self._score_move_from_rays(
+                move_angle=move_angle,
+                rays=global_rays,
+                angle_window=30.0,
+            )
 
-            weighted_sum = 0.0
-            weight_total = 0.0
+            action_debug["score"] = move_score
+            action_debug["rays"] = matched_rays
 
-            for scan_angle in SCAN_ANGLES_DEG:
-                diff = self._angle_diff_deg(move_angle, scan_angle)
-
-                # 只看 ±30°
-                if diff > 30.0:
-                    continue
-
-                ray_score = self._ray_collision_score(
-                    start_x=nx,
-                    start_z=nz,
-                    angle_deg=scan_angle,
-                    max_len=18,
-                    step_size=1.0,
-                )
-
-                # 线性衰减：中心最大，边缘最小
-                weight = 1.0 - diff / 30.0
-
-                weighted_sum += weight * ray_score
-                weight_total += weight
-
-                action_debug["rays"].append({
-                    "scan_angle": float(scan_angle),
-                    "diff": float(diff),
-                    "weight": float(weight),
-                    "ray_score": float(ray_score),
-                })
-
-            if weight_total <= 1e-6:
-                score = 0.0
-            else:
-                score = float(np.clip(weighted_sum / weight_total, 0.0, 1.0))
-
-            move_scores.append(score)
-            action_debug["score"] = score
+            move_scores.append(move_score)
             debug_infos.append(action_debug)
 
         move_scores = np.asarray(move_scores, dtype=np.float32)
 
         if return_debug:
-            return move_scores, debug_infos
+            return move_scores, debug_infos, global_rays
         return move_scores
 
     def _compute_abb_penalty(self, cur_hero_pos):
@@ -601,20 +640,21 @@ class Preprocessor:
             if 0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT:
                 monster_positions.append((mx, mz))
 
-        move_safety_feat, move_debug_infos = self._move_safety(
+        move_safety_feat, _move_debug_infos, _global_rays = self._move_safety(
             hero_pos["x"],
             hero_pos["z"],
             monster_positions,
             return_debug=True,
         )
 
-        _log_passable_map_and_rays(
-            self.logger,
-            map_feat[0],
-            move_debug_infos,
-            step_no=self.step_no,
-            title="move_debug",
-        )
+        # _log_passable_map_and_rays(
+        #     self.logger,
+        #     map_feat[0],
+        #     global_rays,
+        #     move_safety_feat,
+        #     step_no=self.step_no,
+        #     title="move_debug",
+        # )
 
         # 合法动作掩码 (16D)，仅用于 action masking，不再直接拼入 observation 向量
         legal_action = [1] * 16
