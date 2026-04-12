@@ -149,7 +149,7 @@ def _log_gray_map_as_binary(logger, gray_map, title="map36"):
     规则：>0 的都记为 1，因此 0.5 也会记成 1。
     """
     arr = np.asarray(gray_map)
-    assert arr.shape == (VIEW_MAP_SIZE, VIEW_MAP_SIZE), f"expect ({VIEW_MAP_SIZE},{VIEW_MAP_SIZE}), got {arr.shape}"
+    assert arr.shape == (36, 36), f"expect (36,36), got {arr.shape}"
 
     s = "".join("1" if v > 0 else "0" for v in arr.reshape(-1))
     logger.warning(f"[{title}]{s}")
@@ -231,14 +231,19 @@ class Preprocessor:
             return False
         return bool(self.passable_map[x, z] > 0)
 
-    def _open_length(self, hero_x, hero_z, dx, dz, max_len=int(VIEW_MAP_SIZE*0.707)):
+    def _open_length(self, hero_x, hero_z, dx, dz, max_len=6):
         """
-        从当前位置沿 (dx, dz) 方向，统计连续可通行格数。
+        从英雄当前位置沿 (dx, dz) 方向，统计连续可通行长度。
         """
+        hero_x = int(hero_x)
+        hero_z = int(hero_z)
+        dx = int(dx)
+        dz = int(dz)
+
         open_len = 0
-        while open_len <= max_len:
-            nx = round(hero_x + dx * open_len)
-            nz = round(hero_z + dz * open_len)
+        for step in range(1, int(max_len) + 1):
+            nx = hero_x + dx * step
+            nz = hero_z + dz * step
             if not self._is_global_passable(nx, nz):
                 break
             open_len += 1
@@ -294,8 +299,6 @@ class Preprocessor:
         """Compute 8-direction flash safety.
 
         计算 8 个闪现方向的安全性特征。
-        若某个方向的闪现路径中穿过了障碍物，并且最终能落到合法点，
-        则该方向 safety 直接给满 1.0。
         """
         hero_x = int(hero_x)
         hero_z = int(hero_z)
@@ -305,20 +308,6 @@ class Preprocessor:
             fx, fz, ok = self._flash_landing_offset(hero_x, hero_z, dx, dz)
             if not ok:
                 flash_scores.append(0.0)
-                continue
-
-            landed_step = int(max(abs(fx), abs(fz)))
-            crossed_obstacle = 0
-            for step in range(1, landed_step):
-                px = hero_x + dx * step
-                pz = hero_z + dz * step
-                if not self._is_global_passable(px, pz):
-                    crossed_obstacle += 1
-                    if crossed_obstacle > 2:
-                        break
-
-            if crossed_obstacle:
-                flash_scores.append(1.0)
                 continue
 
             nx = hero_x + fx
@@ -392,7 +381,7 @@ class Preprocessor:
                     rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
 
                     raw_dist = np.sqrt(dx * dx + dz * dz)
-                    dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 10)
+                    dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 9)
 
                     # 视野内时，用连续方向覆盖离散方向
                     if raw_dist > 1e-6:
@@ -462,7 +451,7 @@ class Preprocessor:
                 dir_x = dx / raw_dist
                 dir_z = dz / raw_dist
             else:
-                dir_idx = int(organ.get("hero_relative_direction", 0))
+                dir_idx = int(m.get("hero_relative_direction", 0))
                 dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
 
             treasure_feat[i * 5 : i * 5 + 5] = np.array(
@@ -557,6 +546,7 @@ class Preprocessor:
         step_norm = _norm(self.step_no, self.max_step)
         progress_treasure_collect = _norm(int(hero.get("treasure_collected_count", 0)), 10)
         monster_interval = env_info.get("monster_interval", 300)
+        assert monster_interval > 0, f"monster insterval < 0! value:{monster_interval}"
         time_before_second_mounster = _norm(max(0, monster_interval - self.step_no), self.max_step)
         
         monster_speedup_time = env_info.get("monster_speed_boost_step", 0)
@@ -697,7 +687,7 @@ class Preprocessor:
         reward_vector = [
             0.30 * score_gain,
             survive_phase_weight * 0.02,
-            3.50 * dist_shaping_norm_weight * monster_dist_reward,
+            0.35 * dist_shaping_norm_weight * monster_dist_reward,
             5.00 * treasure_phase_weight * treasure_reward,
             0.25 * treasure_phase_weight * dist_shaping_norm_weight * treasure_dist_reward,
             0.35 * buff_reward,

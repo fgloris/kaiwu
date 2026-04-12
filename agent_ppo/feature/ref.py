@@ -684,7 +684,7 @@ class Preprocessor:
             if not moved:
                 wall_penalty = -0.2
 
-        if reward_feats["progress_feats"][2] > 0 and reward_feats["progress_feats"][3] > 0: # time before second monseter appears and monster speedup
+        if reward_feats["progress_feats"][2] > 0 and reward_feats["progress_feats"][3] > 0: # time before second monseter and has monster speedup
             # 早期：鼓励探索和拿宝箱
             treasure_phase_weight = 1.50
             survive_phase_weight = 0.85
