@@ -433,10 +433,8 @@ class Preprocessor:
                     map_feat[0, i, j] = float(self.passable_map[gx, gy])
                     map_feat[1, i, j] = float(self.visibility_map[gx, gy])
         
-        _log_gray_map_as_binary(self.logger, map_feat[0], title=f"before:{self.step_no}")
-        _log_gray_map_as_binary(self.logger, map_feat[1], title=f"vis:{self.step_no}")
-        map_feat[0] = _expand_passable_edges_in_unknown(map_feat[0], map_feat[1], fill_value=0.5)
-        _log_gray_map_as_binary(self.logger, map_feat[0], title=f"after:{self.step_no}")
+        # _log_gray_map_as_binary(self.logger, map_feat[0], title=f"map:{self.step_no}")
+        # _log_gray_map_as_binary(self.logger, map_feat[1], title=f"vis:{self.step_no}")
 
         # 第三层：monster mask
         # 规则：
@@ -452,6 +450,7 @@ class Preprocessor:
             center_i = mx - gx0
             center_j = mz - gy0
             _paint_square(map_feat[2], center_i, center_j, radius=1, value=1.0)
+            _paint_square(map_feat[0], center_i, center_j, radius=1, value=0.0)
 
         # 合法动作掩码 (8D)
         legal_action = [1] * 16
