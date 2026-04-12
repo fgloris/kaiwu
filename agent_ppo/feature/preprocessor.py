@@ -73,8 +73,8 @@ def _norm(v, v_max, v_min=0.0):
 
 def _clip_window(x0, x1, y0, y1, size=MAP_SIZE_INT):
     x0 = max(0, x0)
-    x1 = max(0, x1)
-    y0 = min(size, y0)
+    x1 = min(size, x1)
+    y0 = max(0, y0)
     y1 = min(size, y1)
     return x0, x1, y0, y1
 
@@ -639,7 +639,7 @@ class Preprocessor:
                 dir_x = dx / raw_dist
                 dir_z = dz / raw_dist
             else:
-                dir_idx = int(m.get("hero_relative_direction", 0))
+                dir_idx = int(organ.get("hero_relative_direction", 0))
                 dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
 
             treasure_feat[i * 5 : i * 5 + 5] = np.array(
@@ -660,7 +660,7 @@ class Preprocessor:
                 dir_x = dx / raw_dist
                 dir_z = dz / raw_dist
             else:
-                dir_idx = int(m.get("hero_relative_direction", 0))
+                dir_idx = int(organ.get("hero_relative_direction", 0))
                 dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
 
             buff_feat[i * 5 : i * 5 + 5] = np.array(
@@ -815,27 +815,23 @@ class Preprocessor:
             self.last_monster_dist_norm_1 = float(m1[4])
         if m2[0] > 1e-6:
             self.last_monster_dist_norm_2 = float(m2[4])
+        
+        monster_dist_reward = r1 + 0.2 * r2
 
         # 稀疏奖励：如果 hero-monster 连线从“无遮挡”变成“有隔断”，给一次性大奖励
         los_break_reward = 0.0
-        cur_blocked_1 = False
-        cur_blocked_2 = False
 
         # 只对视野内怪物判这个事件，更稳
-        if m1[0] > 1e-6:
-            cur_blocked_1 = self._line_blocked_by_known_wall(cur_hero_pos, m1)
-            if (not self.last_monster_blocked_1) and cur_blocked_1:
-                los_break_reward += 1.0
+        cur_blocked_1 = bool(m1[0] > 1e-6 and self._line_blocked_by_known_wall(cur_hero_pos, m1))
+        cur_blocked_2 = bool(m2[0] > 1e-6 and self._line_blocked_by_known_wall(cur_hero_pos, m2))
 
-        if m2[0] > 1e-6:
-            cur_blocked_2 = self._line_blocked_by_known_wall(cur_hero_pos, m2)
-            if (not self.last_monster_blocked_2) and cur_blocked_2:
-                los_break_reward += 0.5
+        if (not self.last_monster_blocked_1) and cur_blocked_1:
+            los_break_reward += 1.0
+        if (not self.last_monster_blocked_2) and cur_blocked_2:
+            los_break_reward += 0.5
 
         self.last_monster_blocked_1 = cur_blocked_1
         self.last_monster_blocked_2 = cur_blocked_2
-
-        monster_dist_reward = r1 + 0.2 * r2 + los_break_reward
 
         # buff和宝箱 distance shaping
         # 靠近奖励但远离不惩罚
@@ -909,6 +905,7 @@ class Preprocessor:
             0.30 * score_gain,
             survive_phase_weight * 0.02,
             3.50 * dist_shaping_norm_weight * monster_dist_reward,
+            0.50 * los_break_reward,
             5.00 * treasure_phase_weight * treasure_reward,
             0.25 * treasure_phase_weight * dist_shaping_norm_weight * treasure_dist_reward,
             0.35 * buff_reward,

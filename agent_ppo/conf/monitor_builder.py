@@ -115,6 +115,7 @@ def build_monitor():
         .add_metric(metrics_name="r_score_gain_sum", expr="avg(r_score_gain_sum{})")
         .add_metric(metrics_name="r_survival_gain_sum", expr="avg(r_survival_gain_sum{})")
         .add_metric(metrics_name="r_monster_dist_sum", expr="avg(r_monster_dist_sum{})")
+        .add_metric(metrics_name="r_monster_los_break_sum", expr="avg(r_monster_los_break_sum{})")
         .add_metric(metrics_name="r_treasure_gain_sum", expr="avg(r_treasure_gain_sum{})")
         .add_metric(metrics_name="r_treasure_dist_sum", expr="avg(r_treasure_dist_sum{})")
         .add_metric(metrics_name="r_buff_gain_sum", expr="avg(r_buff_gain_sum{})")
