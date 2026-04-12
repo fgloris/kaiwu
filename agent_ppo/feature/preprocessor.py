@@ -10,6 +10,7 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 峡谷追猎 PPO 特征预处理与奖励设计。
 """
 
+import json
 import numpy as np
 from collections import deque
 
@@ -162,6 +163,33 @@ def _log_gray_map_as_binary(logger, gray_map, title="map36"):
 
     s = "".join("1" if v > 0 else "0" for v in arr.reshape(-1))
     logger.warning(f"[{title}]{s}")
+
+def _log_passable_map_and_rays(logger, gray_map, move_debug_infos, step_no=None, title="move_debug"):
+    """
+    在同一个 logger.warning() 中打印：
+    1. 36x36 passable map（二值压平字符串）
+    2. 8个方向的 ray score / weight / 最终方向分数
+
+    输出格式是 JSON，方便后处理可视化。
+    """
+    if logger is None:
+        return
+
+    arr = np.asarray(gray_map)
+    assert arr.shape == (VIEW_MAP_SIZE, VIEW_MAP_SIZE), \
+        f"expect ({VIEW_MAP_SIZE},{VIEW_MAP_SIZE}), got {arr.shape}"
+
+    map_bits = "".join("1" if v > 0 else "0" for v in arr.reshape(-1))
+
+    payload = {
+        "title": title,
+        "step_no": None if step_no is None else int(step_no),
+        "map_size": int(VIEW_MAP_SIZE),
+        "passable_map_bits": map_bits,
+        "actions": move_debug_infos,
+    }
+
+    logger.warning(f"[{title}]{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}")
 
 class Preprocessor:
     def __init__(self, logger=None):
@@ -335,33 +363,59 @@ class Preprocessor:
             angle += 360
         return float(angle)
 
-    def _move_safety(self, hero_x, hero_z, monster_positions=None):
+    def _move_safety(self, hero_x, hero_z, monster_positions=None, return_debug=False):
         """
         基于 24 条角度射线的 8 方向 move safety。
         对每个动作方向：
         - 若下一步不可走，score=0
         - 否则从下一步落点出发，扫描 24 个方向
-        - 用与动作方向夹角更近的射线赋更高权重
+        - 只统计与动作方向夹角在 ±30° 内的 rays
+        - 越接近动作方向中心，权重越高
+
+        return:
+            if return_debug == False:
+                move_scores
+            else:
+                move_scores, debug_infos
         """
         hero_x = int(hero_x)
         hero_z = int(hero_z)
         move_scores = []
+        debug_infos = []
 
-        for dx, dz in DIR8:
+        for action_idx, (dx, dz) in enumerate(DIR8):
             nx = hero_x + dx
             nz = hero_z + dz
+
+            action_debug = {
+                "action_idx": int(action_idx),
+                "dir": [int(dx), int(dz)],
+                "next_pos": [int(nx), int(nz)],
+                "passable": bool(self._is_global_passable(nx, nz)),
+                "move_angle": None,
+                "score": 0.0,
+                "rays": [],
+            }
 
             # 下一步本身不能走，直接不安全
             if not self._is_global_passable(nx, nz):
                 move_scores.append(0.0)
+                debug_infos.append(action_debug)
                 continue
 
             move_angle = self._dir8_to_angle_deg(dx, dz)
+            action_debug["move_angle"] = float(move_angle)
 
             weighted_sum = 0.0
             weight_total = 0.0
 
             for scan_angle in SCAN_ANGLES_DEG:
+                diff = self._angle_diff_deg(move_angle, scan_angle)
+
+                # 只看 ±30°
+                if diff > 30.0:
+                    continue
+
                 ray_score = self._ray_collision_score(
                     start_x=nx,
                     start_z=nz,
@@ -370,68 +424,33 @@ class Preprocessor:
                     step_size=1.0,
                 )
 
-                # 与动作方向越接近，权重越高；90°之外不给权重
-                diff = self._angle_diff_deg(move_angle, scan_angle)
-                if diff > 30.0:
-                    continue
-
-                # 线性权重：中心=1，边缘=0
+                # 线性衰减：中心最大，边缘最小
                 weight = 1.0 - diff / 30.0
 
                 weighted_sum += weight * ray_score
                 weight_total += weight
 
+                action_debug["rays"].append({
+                    "scan_angle": float(scan_angle),
+                    "diff": float(diff),
+                    "weight": float(weight),
+                    "ray_score": float(ray_score),
+                })
+
             if weight_total <= 1e-6:
-                move_scores.append(0.0)
+                score = 0.0
             else:
-                score = weighted_sum / weight_total
-                move_scores.append(float(np.clip(score, 0.0, 1.0)))
+                score = float(np.clip(weighted_sum / weight_total, 0.0, 1.0))
 
-        return np.asarray(move_scores, dtype=np.float32)
-    
-    def _line_blocked_by_known_wall(self, hero_pos, monster_feat, step_size=0.5):
-        """
-        检查 hero 与 monster 连线上是否存在已知障碍物。
-        规则：
-        - monster_feat 里已有 rel_x / rel_z，可直接还原 monster 估计位置
-        - 连线上若遇到 visibility=1 且 passable=0，则视为被墙阻挡
-        - 若途中遇到未知区 visibility=0，则停止检查并按“不阻挡”处理
-        """
-        if hero_pos is None or monster_feat is None:
-            return False
+            move_scores.append(score)
+            action_debug["score"] = score
+            debug_infos.append(action_debug)
 
-        hero_x = float(hero_pos[0])
-        hero_z = float(hero_pos[1])
+        move_scores = np.asarray(move_scores, dtype=np.float32)
 
-        rel_x = float(monster_feat[2]) * MAP_SIZE
-        rel_z = float(monster_feat[3]) * MAP_SIZE
-
-        monster_x = hero_x + rel_x
-        monster_z = hero_z + rel_z
-
-        dx = monster_x - hero_x
-        dz = monster_z - hero_z
-        dist = float(np.hypot(dx, dz))
-
-        if dist < 1e-6:
-            return False
-
-        ux = dx / dist
-        uz = dz / dist
-
-        t = step_size
-        while t < dist:
-            x = int(round(hero_x + ux * t))
-            z = int(round(hero_z + uz * t))
-
-            if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
-                return True
-            # 已知墙
-            if self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0:
-                return True
-            t += step_size
-
-        return False
+        if return_debug:
+            return move_scores, debug_infos
+        return move_scores
 
     def _compute_abb_penalty(self, cur_hero_pos):
         """ABB penalty: punish staying inside a tiny axis-aligned box for too long.
@@ -575,13 +594,27 @@ class Preprocessor:
             _paint_square(map_feat[2], center_i, center_j, radius=1, value=1.0)
 
         # 基于全局记忆 + 怪物估计位置，计算 move / flash safety
+        # 基于全局记忆 + 怪物估计位置，计算 move safety
         monster_positions = []
         for m in monsters[:2]:
             mx, mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
             if 0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT:
                 monster_positions.append((mx, mz))
 
-        move_safety_feat = self._move_safety(hero_pos["x"], hero_pos["z"], monster_positions)
+        move_safety_feat, move_debug_infos = self._move_safety(
+            hero_pos["x"],
+            hero_pos["z"],
+            monster_positions,
+            return_debug=True,
+        )
+
+        _log_passable_map_and_rays(
+            self.logger,
+            map_feat[0],
+            move_debug_infos,
+            step_no=self.step_no,
+            title="move_debug",
+        )
 
         # 合法动作掩码 (16D)，仅用于 action masking，不再直接拼入 observation 向量
         legal_action = [1] * 16
@@ -634,6 +667,11 @@ class Preprocessor:
         return vector_feat, map_feat, reward_feats, legal_action
     
     def calculate_reward(self, env_obs, reward_feats):
+        # 1.若怪物在视野外，让模型跑得更远一点。                            --> 通过 monster dist shaping? 这个足以做到吗？
+        # 2.若怪物在视野内且附近有弯道，让模型尽快将其拉脱视野。             --> 加一点视野脱离奖励？monster dist shaping?
+        # 3.尽量不要撞墙。1.不要撞侧面的墙。2.不要走进死胡同。              --> 计算路径方向？
+        # 4.不要原地打转。                                               --> ABB惩罚？好像做不到。方向一致性惩罚？
+
         # 基于比赛分数增量的奖励
         env_info = env_obs["observation"].get("env_info", {})
         cur_total_score = float(env_info.get("total_score", 0.0))
@@ -641,10 +679,9 @@ class Preprocessor:
         self.last_total_score = cur_total_score
         
         # 怪物 dist shaping
-        # 规则：
-        # - 用 monster_feats[..., 4] 作为 dist_norm
-        # - 如果 hero 和 monster 连线上有已知墙，则该怪物 dist shaping 记为 0
-        # - 只对 is_in_view 的怪物更新 last_monster_dist_norm，避免视野外估计值抖动过大
+        
+        second_exists = bool(reward_feats['progress_feats'][2] < 1e-6)
+
         monster_dist_reward = 0.0
         cur_hero_pos = reward_feats.get("hero_pos")
 
@@ -657,45 +694,44 @@ class Preprocessor:
         if self.last_monster_dist_norm_1 >= 0:
             cur_dist_1 = float(m1[4])   # dist_norm
             r1 = cur_dist_1 - self.last_monster_dist_norm_1
-            #if self._line_blocked_by_known_wall(cur_hero_pos, m1):
-                #r1 *= 0.1
+
         # monster 2
-        if self.last_monster_dist_norm_2 >= 0:
-            cur_dist_2 = float(m2[4])   # dist_norm
-            r2 = cur_dist_2 - self.last_monster_dist_norm_2
-            #if self._line_blocked_by_known_wall(cur_hero_pos, m2):
-                #r2 *= 0.1
+        if second_exists:
+            if self.last_monster_dist_norm_2 >= 0:
+                cur_dist_2 = float(m2[4])   # dist_norm
+                r2 = cur_dist_2 - self.last_monster_dist_norm_2
 
         self.last_monster_dist_norm_1 = float(m1[4])
-        self.last_monster_dist_norm_2 = float(m2[4])
+        if second_exists:
+            self.last_monster_dist_norm_2 = float(m2[4])
         
         monster_dist_reward = r1 + r2
 
-        # 稀疏奖励：如果 hero-monster 连线从“无遮挡”变成“有隔断”，给一次性大奖励
+        # 稀疏奖励：如果 monster 从视野内变成视野外给奖励，从视野内变成视野外给轻惩罚
+        # 稠密奖励：在视野外时持续获得奖励
         los_break_reward = 0.0
 
-        # 只对视野内怪物判这个事件，更稳
-        cur_blocked_1 = bool(m1[0] > 1e-6 and self._line_blocked_by_known_wall(cur_hero_pos, m1))
-        cur_blocked_2 = bool(m2[0] > 1e-6 and self._line_blocked_by_known_wall(cur_hero_pos, m2))
+        cur_blocked_1 = bool(m1[0] > 1e-6)
+        cur_blocked_2 = bool(m2[0] > 1e-6)
 
+        if cur_blocked_1:
+            los_break_reward += 0.01
         if (not self.last_monster_blocked_1) and cur_blocked_1:
             los_break_reward += 1.0
-        if (not self.last_monster_blocked_2) and cur_blocked_2:
-            los_break_reward += 1.0
         if self.last_monster_blocked_1 and (not cur_blocked_1):
-            los_break_reward -= 1.0
-        if self.last_monster_blocked_2 and (not cur_blocked_2):
-            los_break_reward -= 1.0
+            los_break_reward -= 0.5
+
+        if second_exists:
+            if cur_blocked_2:
+                los_break_reward += 0.01
+            if (not self.last_monster_blocked_2) and cur_blocked_2:
+                los_break_reward += 1.0
+            if self.last_monster_blocked_2 and (not cur_blocked_2):
+                los_break_reward -= 0.5
         
-        los_break_reward = 0.0
-
         self.last_monster_blocked_1 = cur_blocked_1
-        self.last_monster_blocked_2 = cur_blocked_2
-
-        # 1.若怪物在视野外，让模型跑得更远一点。                            --> 通过 monster dist shaping? 这个足以做到吗？
-        # 2.若怪物在视野内且附近有弯道，让模型尽快将其拉脱视野。             --> 加一点视野脱离奖励？monster dist shaping?
-        # 3.尽量不要撞墙。1.不要撞侧面的墙。2.不要走进死胡同。              --> 计算路径方向？
-        # 4.不要原地打转。                                               --> ABB惩罚？好像做不到。方向一致性惩罚？
+        if second_exists:
+            self.last_monster_blocked_2 = cur_blocked_2
         
         # 闪现释放奖励
         flash_reward = 0.0
