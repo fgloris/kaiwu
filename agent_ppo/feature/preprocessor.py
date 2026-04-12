@@ -11,7 +11,6 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 """
 
 import json
-import math
 import numpy as np
 from collections import deque
 
@@ -21,6 +20,11 @@ MAP_SIZE_INT = 128
 LOCAL_MAP_SIZE = 21
 LOCAL_MAP_HALF = 10
 VIEW_MAP_SIZE = 36
+
+# Anti-box-behavior / ABB 停留惩罚参数
+ABB_WINDOW = 8          # 统计最近多少帧位置
+ABB_RADIUS = 2           # 若最近位置都落在半径 2 的小框内，则视为停留
+ABB_MAX_PENALTY = 0.25   # 最大 ABB 惩罚幅度
 
 # Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 5.0
@@ -194,36 +198,6 @@ def _log_passable_map_and_rays(logger, gray_map, global_rays, move_scores, step_
 
     logger.warning(f"[{title}]{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}")
 
-
-def _log_passable_map_and_topology(logger, gray_map, move_scores, reach_masks=None, step_no=None, title="move_topology"):
-    """
-    单次 warning 输出：
-    1. 36x36 passable map 压平
-    2. 8 个方向 score
-    3. 8 个方向各自的 reachable mask（可选，压平成 01 字符串）
-    """
-    if logger is None:
-        return
-
-    arr = np.asarray(gray_map)
-    assert arr.shape == (VIEW_MAP_SIZE, VIEW_MAP_SIZE), \
-        f"expect ({VIEW_MAP_SIZE},{VIEW_MAP_SIZE}), got {arr.shape}"
-
-    map_bits = "".join("1" if v > 0 else "0" for v in arr.reshape(-1))
-    payload = {
-        "step": None if step_no is None else int(step_no),
-        "map": map_bits,
-        "move_scores": [round(float(x), 4) for x in move_scores],
-    }
-
-    #if reach_masks is not None:
-    #    payload["reach_masks"] = [
-    #        "".join("1" if v > 0 else "0" for v in np.asarray(mask).reshape(-1))
-    #        for mask in reach_masks
-    #    ]
-
-    logger.warning(f"[{title}]{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}")
-
 class Preprocessor:
     def __init__(self, logger=None):
         self.logger = logger
@@ -242,6 +216,7 @@ class Preprocessor:
         self.last_flash_count = 0
 
         self.prev_hero_pos = None
+        self.recent_positions = deque(maxlen=ABB_WINDOW)
 
         # ========= 两层全局记忆 =========
         # 第一层：可通行地图：1=可走, 0=不能走/未知
@@ -346,6 +321,45 @@ class Preprocessor:
             return False
         return bool(self.visibility_map[x, z] == 0)
 
+    def _ray_collision_score(self, start_x, start_z, angle_deg, max_len=VIEW_MAP_SIZE/2, step_size=1.0):
+        """
+        从 (start_x, start_z) 朝 angle_deg 方向发射一条射线。
+        - 若在已知区域内撞到墙，则 score = dist / max_len，越晚撞墙分越高
+        - 若遇到未知区域，则返回 1.0（未知区域不判危险）
+        - 若一直到 max_len 都没撞墙，则返回 1.0
+        - 若射线走出地图边界，则按“撞边界”处理，也返回 dist / max_len
+        """
+        theta = np.deg2rad(angle_deg)
+        dx = np.cos(theta)
+        dz = -np.sin(theta)   # 与 DIR9_TO_VEC 的 z 方向保持一致：北是负 z
+
+        dist = step_size
+        while dist <= max_len:
+            x = int(round(start_x + dx * dist))
+            z = int(round(start_z + dz * dist))
+
+            # 出界：按在该距离处碰壁处理
+            if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
+                return float(np.clip(dist / max_len, 0.0, 1.0))
+
+            # 未知区域：不继续往前判，直接认为安全
+            if self._is_unknown(x, z):
+                return 1.0
+
+            # 已知墙：按撞墙距离线性给分
+            if self._is_known_wall(x, z):
+                return float(np.clip(dist / max_len, 0.0, 1.0))
+
+            dist += step_size
+        return 1.0
+
+    def _angle_diff_deg(self, a, b):
+        """
+        返回两个角度的最小夹角，范围 [0, 180]
+        """
+        d = abs(a - b) % 360
+        return min(d, 360 - d)
+
     def _dir8_to_angle_deg(self, dx, dz):
         """
         DIR8 -> 角度
@@ -357,179 +371,150 @@ class Preprocessor:
         if angle < 0:
             angle += 360
         return float(angle)
-
-    def _build_local_topology_patch(self, hero_x, hero_z):
+    
+    def _compute_global_rays(self, start_x, start_z, max_len=18, step_size=1.0):
         """
-        仅构造当前 hero 周围 21x21 的绝对已知 patch。
-        这版先只在中心 21x21 上做 topology，不使用 36x36 外圈的历史视野。
-
+        从同一个起点统一发射全局 rays（0,15,30,...,345），每根只算一次。
         返回：
-            passable21: [21,21]  1=可走, 0=不可走
-            known21:    [21,21]  1=当前 patch 内有效, 0=越界
+            [
+                {"angle": 0.0, "score": 1.0},
+                {"angle": 15.0, "score": 1.0},
+                ...
+            ]
+        """
+        start_x = int(start_x)
+        start_z = int(start_z)
+
+        rays = []
+        for angle_deg in SCAN_ANGLES_DEG:
+            ray_score = self._ray_collision_score(
+                start_x=start_x,
+                start_z=start_z,
+                angle_deg=angle_deg,
+                max_len=max_len,
+                step_size=step_size,
+            )
+            rays.append({
+                "angle": float(angle_deg),
+                "score": float(ray_score),
+            })
+        return rays
+    
+    def _score_move_from_rays(self, move_angle, rays, angle_window=30.0):
+        """
+        用统一的一组全局 rays，对某个 move_angle 打分。
+        只看 ±angle_window 内的 rays，按角度差线性加权。
+        """
+        weighted_sum = 0.0
+        weight_total = 0.0
+        matched_rays = []
+
+        for ray in rays:
+            ray_angle = float(ray["angle"])
+            ray_score = float(ray["score"])
+
+            diff = self._angle_diff_deg(move_angle, ray_angle)
+            if diff > angle_window:
+                continue
+
+            weight = 1.0 - diff / angle_window
+
+            weighted_sum += weight * ray_score
+            weight_total += weight
+
+            matched_rays.append({
+                "angle": ray_angle,
+                "score": ray_score,
+            })
+
+        if weight_total <= 1e-6:
+            move_score = 0.0
+        else:
+            move_score = float(np.clip(weighted_sum / weight_total, 0.0, 1.0))
+
+        return move_score, matched_rays
+
+    def _move_safety(self, hero_x, hero_z, monster_positions=None, return_debug=False):
+        """
+        基于一组全局 rays 的 8 方向 move safety。
+        1. 从 hero 当前位置统一发射一组全局 rays（0,15,...,345），每根只算一次
+        2. 对每个动作方向：
+        - 若下一步不可走，score=0
+        - 否则用该方向去匹配全局 rays 中 ±30° 内的那些 ray
+        - 按角度差加权聚合成该方向的 move score
         """
         hero_x = int(hero_x)
         hero_z = int(hero_z)
 
-        size = LOCAL_MAP_SIZE
-        half = LOCAL_MAP_HALF
-        passable21 = np.zeros((size, size), dtype=np.uint8)
-        known21 = np.zeros((size, size), dtype=np.uint8)
-
-        for j in range(size):
-            for i in range(size):
-                gx = hero_x + (i - half)
-                gz = hero_z + (j - half)
-                if 0 <= gx < MAP_SIZE_INT and 0 <= gz < MAP_SIZE_INT:
-                    known21[j, i] = 1
-                    passable21[j, i] = 1 if self.passable_map[gx, gz] > 0 else 0
-
-        return passable21, known21
-
-    def _embed_local_mask_to_view36(self, local_mask21):
-        """将 21x21 mask 嵌入 36x36 的中心区域，便于统一日志和可视化。"""
-        out = np.zeros((VIEW_MAP_SIZE, VIEW_MAP_SIZE), dtype=np.uint8)
-        start = VIEW_MAP_SIZE // 2 - LOCAL_MAP_HALF
-        end = start + LOCAL_MAP_SIZE
-        out[start:end, start:end] = np.asarray(local_mask21, dtype=np.uint8)
-        return out
-
-    def _directional_reachability_score(self, passable21, known21, move_dx, move_dz):
-        """
-        方向受限洪泛：
-        - 只在当前 21x21 已知区域内搜索
-        - 前几层只允许较强的方向一致性
-        - 后续层允许拐弯，但不允许明显回头
-
-        返回：
-            score: float in [0,1]
-            reach_mask21: [21,21] visited mask
-            debug: dict
-        """
-        size = LOCAL_MAP_SIZE
-        center = LOCAL_MAP_HALF
-        sx = center + int(move_dx)
-        sy = center + int(move_dz)
-
-        reach_mask21 = np.zeros((size, size), dtype=np.uint8)
-        debug = {
-            "weighted_area": 0.0,
-            "max_depth": 0,
-            "near_width": 0.0,
-            "visited_count": 0,
-        }
-
-        if not (0 <= sx < size and 0 <= sy < size):
-            return 0.0, reach_mask21, debug
-        if known21[sy, sx] == 0 or passable21[sy, sx] == 0:
-            return 0.0, reach_mask21, debug
-
-        v0 = np.asarray([float(move_dx), float(move_dz)], dtype=np.float32)
-        v0 = v0 / (np.linalg.norm(v0) + 1e-6)
-
-        strict_depth = 4
-        strict_cos = 0.5   # 约 ±60°
-        loose_cos = 0.0    # 不允许明显回头
-
-        best_weight = np.zeros((size, size), dtype=np.float32)
-        best_depth = np.full((size, size), 10 ** 9, dtype=np.int32)
-        q = deque()
-        q.append((sx, sy, 1, 1.0))
-        best_weight[sy, sx] = 1.0
-        best_depth[sy, sx] = 1
-
-        layer_counts = {}
-
-        while q:
-            x, y, depth, path_w = q.popleft()
-
-            if path_w + 1e-6 < best_weight[y, x] and depth >= best_depth[y, x]:
-                continue
-
-            reach_mask21[y, x] = 1
-            layer_counts[depth] = layer_counts.get(depth, 0) + 1
-
-            for step_dx, step_dz in DIR8:
-                nx = x + step_dx
-                ny = y + step_dz
-                if not (0 <= nx < size and 0 <= ny < size):
-                    continue
-                if known21[ny, nx] == 0 or passable21[ny, nx] == 0:
-                    continue
-
-                step_v = np.asarray([float(step_dx), float(step_dz)], dtype=np.float32)
-                step_v = step_v / (np.linalg.norm(step_v) + 1e-6)
-                dot = float(np.dot(step_v, v0))
-
-                if depth < strict_depth:
-                    if dot < strict_cos:
-                        continue
-                else:
-                    if dot < loose_cos:
-                        continue
-
-                step_weight = max(dot, 0.0)
-                if depth < strict_depth:
-                    step_weight = max(step_weight, 0.35)
-                else:
-                    step_weight = max(step_weight, 0.15)
-
-                new_depth = depth + 1
-                new_w = path_w * step_weight
-
-                if new_w > best_weight[ny, nx] + 1e-6 or new_depth < best_depth[ny, nx]:
-                    best_weight[ny, nx] = max(best_weight[ny, nx], new_w)
-                    best_depth[ny, nx] = min(best_depth[ny, nx], new_depth)
-                    q.append((nx, ny, new_depth, new_w))
-
-        weighted_area = float(best_weight.sum())
-        visited_count = int(reach_mask21.sum())
-        valid_count = int((known21 * passable21).sum())
-        max_depth = int(np.max(best_depth[reach_mask21 > 0])) if visited_count > 0 else 0
-
-        near_layers = [layer_counts.get(d, 0) for d in range(1, 5)]
-        near_width = float(sum(near_layers) / max(1, len(near_layers)))
-
-        area_score = weighted_area / max(1.0, float(valid_count))
-        depth_score = min(1.0, max_depth / 10.0)
-        width_score = min(1.0, near_width / 3.0)
-
-        score = 0.60 * area_score + 0.25 * depth_score + 0.15 * width_score
-        score = float(np.clip(score, 0.0, 1.0))
-
-        debug["weighted_area"] = weighted_area
-        debug["max_depth"] = max_depth
-        debug["near_width"] = near_width
-        debug["visited_count"] = visited_count
-        return score, reach_mask21, debug
-
-    def _move_safety(self, hero_x, hero_z, monster_positions=None, return_debug=False):
-        """
-        基于当前中心 21x21 已知区域的方向受限洪泛，输出 8 个方向 move safety。
-        这版故意不使用 36x36 外圈历史视野，避免把未知区域误当成拓扑通路。
-        """
-        passable21, known21 = self._build_local_topology_patch(hero_x, hero_z)
+        # 先统一计算一组全局 rays
+        global_rays = self._compute_global_rays(
+            start_x=hero_x,
+            start_z=hero_z,
+            max_len=18,
+            step_size=1.0,
+        )
 
         move_scores = []
         debug_infos = []
-        reach_masks36 = []
 
         for dx, dz in DIR8:
-            score, reach_mask21, dbg = self._directional_reachability_score(
-                passable21=passable21,
-                known21=known21,
-                move_dx=dx,
-                move_dz=dz,
+            nx = hero_x + dx
+            nz = hero_z + dz
+
+            action_debug = {
+                "score": 0.0,
+                "rays": [],
+            }
+
+            # 下一步本身不能走，则该方向直接为 0
+            if not self._is_global_passable(nx, nz):
+                move_scores.append(0.0)
+                debug_infos.append(action_debug)
+                continue
+
+            move_angle = self._dir8_to_angle_deg(dx, dz)
+            move_score, matched_rays = self._score_move_from_rays(
+                move_angle=move_angle,
+                rays=global_rays,
+                angle_window=30.0,
             )
 
-            move_scores.append(score)
-            debug_infos.append(dbg)
-            reach_masks36.append(self._embed_local_mask_to_view36(reach_mask21))
+            action_debug["score"] = move_score
+            action_debug["rays"] = matched_rays
+
+            move_scores.append(move_score)
+            debug_infos.append(action_debug)
 
         move_scores = np.asarray(move_scores, dtype=np.float32)
 
         if return_debug:
-            return move_scores, debug_infos, reach_masks36
+            return move_scores, debug_infos, global_rays
         return move_scores
+
+    def _compute_abb_penalty(self, cur_hero_pos):
+        """ABB penalty: punish staying inside a tiny axis-aligned box for too long.
+
+        ABB 惩罚：若最近若干帧一直停留在一个很小的轴对齐包围盒内，则给予惩罚。
+        """
+        if cur_hero_pos is None:
+            return 0.0
+
+        self.recent_positions.append((int(cur_hero_pos[0]), int(cur_hero_pos[1])))
+
+        if len(self.recent_positions) < ABB_WINDOW:
+            return 0.0
+
+        xs = [p[0] for p in self.recent_positions]
+        zs = [p[1] for p in self.recent_positions]
+
+        span_x = max(xs) - min(xs)
+        span_z = max(zs) - min(zs)
+
+        if span_x <= 2 * ABB_RADIUS and span_z <= 2 * ABB_RADIUS:
+            tightness = 1.0 - max(span_x, span_z) / float(max(1, 2 * ABB_RADIUS))
+            return -ABB_MAX_PENALTY * float(np.clip(tightness, 0.0, 1.0))
+
+        return 0.0
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -655,21 +640,21 @@ class Preprocessor:
             if 0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT:
                 monster_positions.append((mx, mz))
 
-        move_safety_feat, _move_debug_infos, _reach_masks36 = self._move_safety(
+        move_safety_feat, _move_debug_infos, _global_rays = self._move_safety(
             hero_pos["x"],
             hero_pos["z"],
             monster_positions,
             return_debug=True,
         )
 
-        _log_passable_map_and_topology(
-            self.logger,
-            map_feat[0],
-            move_safety_feat,
-            reach_masks=_reach_masks36,
-            step_no=self.step_no,
-            title="move_topology",
-        )
+        # _log_passable_map_and_rays(
+        #     self.logger,
+        #     map_feat[0],
+        #     global_rays,
+        #     move_safety_feat,
+        #     step_no=self.step_no,
+        #     title="move_debug",
+        # )
 
         # 合法动作掩码 (16D)，仅用于 action masking，不再直接拼入 observation 向量
         legal_action = [1] * 16
@@ -691,7 +676,7 @@ class Preprocessor:
         time_before_second_mounster = _norm(max(0, monster_interval - self.step_no), self.max_step)
         
         monster_speedup_time = env_info.get("monster_speed_boost_step", 0)
-        # self.logger.warning(f"env info: {env_info}, monster speedup time value:{monster_speedup_time}")
+        self.logger.warning(f"env info: {env_info}, monster speedup time value:{monster_speedup_time}")
         time_before_mounster_speedup = _norm(max(0, monster_speedup_time - self.step_no), self.max_step)
         progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, time_before_mounster_speedup], dtype=np.float32)
 
@@ -724,8 +709,8 @@ class Preprocessor:
     def calculate_reward(self, env_obs, reward_feats):
         # 1.若怪物在视野外，让模型跑得更远一点。                            --> 通过 monster dist shaping? 这个足以做到吗？
         # 2.若怪物在视野内且附近有弯道，让模型尽快将其拉脱视野。             --> 加一点视野脱离奖励？monster dist shaping?
-        # 3.尽量不要撞墙。1.不要撞侧面的墙。2.不要走进死胡同。              --> 计算路径方向？加一个靠近墙的惩罚？
-        # 4.不要原地打转。                                               --> ABB惩罚？好像做不到。方向一致性惩罚？本质上是一样的。我们不应该惩罚他，怪物在视野外，模型不知道去哪里。
+        # 3.尽量不要撞墙。1.不要撞侧面的墙。2.不要走进死胡同。              --> 计算路径方向？
+        # 4.不要原地打转。                                               --> ABB惩罚？好像做不到。方向一致性惩罚？
 
         # 基于比赛分数增量的奖励
         env_info = env_obs["observation"].get("env_info", {})
@@ -795,6 +780,10 @@ class Preprocessor:
             flash_reward = los_break_reward + 0.5 * monster_dist_reward
         self.last_flash_count = flash_count
 
+        # ABB 停留惩罚：若最近若干帧一直困在一个小范围内，则惩罚
+        cur_hero_pos = reward_feats.get("hero_pos")
+        abb_penalty = self._compute_abb_penalty(cur_hero_pos)
+
         survive_phase_weight = 1.00
 
         # final step reward vector
@@ -806,6 +795,7 @@ class Preprocessor:
             3.50 * dist_shaping_norm_weight * monster_dist_reward,
             0.50 * los_break_reward,
             0.25 * flash_reward,
+            1.00 * abb_penalty,
         ]
 
         return reward_vector, sum(reward_vector)
