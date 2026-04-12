@@ -11,6 +11,7 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 """
 
 import numpy as np
+from collections import deque
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
@@ -18,6 +19,11 @@ MAP_SIZE_INT = 128
 LOCAL_MAP_SIZE = 21
 LOCAL_MAP_HALF = 10
 VIEW_MAP_SIZE = 36
+
+# Anti-box-behavior / ABB 停留惩罚参数
+ABB_WINDOW = 8          # 统计最近多少帧位置
+ABB_RADIUS = 2           # 若最近位置都落在半径 2 的小框内，则视为停留
+ABB_MAX_PENALTY = 0.25   # 最大 ABB 惩罚幅度
 
 # Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 5.0
@@ -177,6 +183,7 @@ class Preprocessor:
         self.last_buff_dist_norm_2 = 0.0
 
         self.prev_hero_pos = None
+        self.recent_positions = deque(maxlen=ABB_WINDOW)
 
         # ========= 两层全局记忆 =========
         # 第一层：可通行地图：1=可走, 0=不能走/未知
@@ -336,6 +343,31 @@ class Preprocessor:
             flash_scores.append(float(np.clip(score, 0.0, 1.0)))
 
         return np.asarray(flash_scores, dtype=np.float32)
+
+    def _compute_abb_penalty(self, cur_hero_pos):
+        """ABB penalty: punish staying inside a tiny axis-aligned box for too long.
+
+        ABB 惩罚：若最近若干帧一直停留在一个很小的轴对齐包围盒内，则给予惩罚。
+        """
+        if cur_hero_pos is None:
+            return 0.0
+
+        self.recent_positions.append((int(cur_hero_pos[0]), int(cur_hero_pos[1])))
+
+        if len(self.recent_positions) < ABB_WINDOW:
+            return 0.0
+
+        xs = [p[0] for p in self.recent_positions]
+        zs = [p[1] for p in self.recent_positions]
+
+        span_x = max(xs) - min(xs)
+        span_z = max(zs) - min(zs)
+
+        if span_x <= 2 * ABB_RADIUS and span_z <= 2 * ABB_RADIUS:
+            tightness = 1.0 - max(span_x, span_z) / float(max(1, 2 * ABB_RADIUS))
+            return -ABB_MAX_PENALTY * float(np.clip(tightness, 0.0, 1.0))
+
+        return 0.0
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -670,17 +702,9 @@ class Preprocessor:
             flash_reward = 0.5 * monster_dist_reward + 0.5 * treasure_dist_reward + 0.1 * buff_dist_reward
         self.last_flash_count = flash_count
 
-        # 撞墙惩罚
-        wall_penalty = 0.0
-        prev_hero_pos = reward_feats.get("prev_hero_pos")
+        # ABB 停留惩罚：若最近若干帧一直困在一个小范围内，则惩罚
         cur_hero_pos = reward_feats.get("hero_pos")
-
-        if prev_hero_pos is not None and cur_hero_pos is not None:
-            dx = cur_hero_pos[0] - prev_hero_pos[0]
-            dz = cur_hero_pos[1] - prev_hero_pos[1]
-            moved = (dx != 0) or (dz != 0)
-            if not moved:
-                wall_penalty = -0.2
+        abb_penalty = self._compute_abb_penalty(cur_hero_pos)
 
         if reward_feats["progress_feats"][2] > 0 and reward_feats["progress_feats"][3] > 0: # time before second monseter appears and monster speedup
             # 早期：鼓励探索和拿宝箱
@@ -703,7 +727,7 @@ class Preprocessor:
             0.35 * buff_reward,
             0.05 * dist_shaping_norm_weight * buff_dist_reward,
             0.25 * flash_reward,
-            1.00 * wall_penalty,
+            1.00 * abb_penalty,
         ]
 
         return reward_vector, sum(reward_vector)
