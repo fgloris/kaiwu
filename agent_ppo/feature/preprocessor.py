@@ -462,7 +462,7 @@ class Preprocessor:
                 dir_x = dx / raw_dist
                 dir_z = dz / raw_dist
             else:
-                dir_idx = int(m.get("hero_relative_direction", 0))
+                dir_idx = int(organ.get("hero_relative_direction", 0))
                 dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
 
             treasure_feat[i * 5 : i * 5 + 5] = np.array(
@@ -483,7 +483,7 @@ class Preprocessor:
                 dir_x = dx / raw_dist
                 dir_z = dz / raw_dist
             else:
-                dir_idx = int(m.get("hero_relative_direction", 0))
+                dir_idx = int(organ.get("hero_relative_direction", 0))
                 dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
 
             buff_feat[i * 5 : i * 5 + 5] = np.array(
