@@ -557,10 +557,12 @@ class Preprocessor:
         step_norm = _norm(self.step_no, self.max_step)
         progress_treasure_collect = _norm(int(hero.get("treasure_collected_count", 0)), 10)
         monster_interval = env_info.get("monster_interval", 300)
-        assert monster_interval > 0, f"monster insterval < 0! value:{monster_interval}"
         time_before_second_mounster = _norm(max(0, monster_interval - self.step_no), self.max_step)
-        has_monster_speedup = 0.0 if env_info.get("monster_speed", 0) <= 1 else 1.0
-        progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, has_monster_speedup], dtype=np.float32)
+        
+        monster_speedup_time = env_info.get("monster_speed_boost_step", 0)
+        self.logger.warning(f"env info: {env_info}, monster speedup time value:{monster_speedup_time}")
+        time_before_mounster_speedup = _norm(max(0, monster_speedup_time - self.step_no), self.max_step)
+        progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, time_before_mounster_speedup], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         # 这里用 move/flash safety 替换 legal_action 作为 observation 输入，
@@ -680,18 +682,14 @@ class Preprocessor:
             if not moved:
                 wall_penalty = -0.2
 
-        if reward_feats["progress_feats"][2] > 0: # time before second monseter
+        if reward_feats["progress_feats"][2] > 0 and reward_feats["progress_feats"][3] > 0: # time before second monseter appears and monster speedup
             # 早期：鼓励探索和拿宝箱
-            treasure_phase_weight = 1.20
-            survive_phase_weight = 0.85
-        elif reward_feats["progress_feats"][3] == 0: # has monster speedup
-            # 中期：逐步平衡
-            treasure_phase_weight = 1.00
-            survive_phase_weight = 1.00
+            treasure_phase_weight = 1.80
+            survive_phase_weight = 0.90
         else:
             # 后期：怪物加速后，生存优先
-            treasure_phase_weight = 0.75
-            survive_phase_weight = 1.50
+            treasure_phase_weight = 0.90
+            survive_phase_weight = 1.80
 
         # final step reward vector
         dist_shaping_norm_weight = 12.8
