@@ -379,7 +379,11 @@ class Preprocessor:
 
                 # 与动作方向越接近，权重越高；90°之外不给权重
                 diff = self._angle_diff_deg(move_angle, scan_angle)
-                weight = max(0.0, np.cos(np.deg2rad(diff)))
+                if diff > 30.0:
+                    continue
+
+                # 线性权重：中心=1，边缘=0
+                weight = 1.0 - diff / 30.0
 
                 weighted_sum += weight * ray_score
                 weight_total += weight
