@@ -48,7 +48,7 @@ class Model(nn.Module):
 
         # 地图分支: [B,1,21,21]->[B,2,36,36]
         self.map_encoder = nn.Sequential(
-            nn.Conv2d(2, 16, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),

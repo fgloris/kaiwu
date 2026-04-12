@@ -121,6 +121,15 @@ def _estimate_monster_pos(hero_x, hero_z, monster):
     mz = int(round(hero_z + dir_z * est_radius))
     return mx, mz
 
+def _paint_square(mask, center_i, center_j, radius=1, value=1.0):
+    h, w = mask.shape
+    for di in range(-radius, radius + 1):
+        for dj in range(-radius, radius + 1):
+            ii = center_i + di
+            jj = center_j + dj
+            if 0 <= ii < h and 0 <= jj < w:
+                mask[ii, jj] = value
+
 class Preprocessor:
     def __init__(self):
         self.reset()
@@ -368,11 +377,12 @@ class Preprocessor:
         for m in monsters[:2]:
             mx, mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
 
-            if 0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT:
-                local_i = mx - gx0
-                local_j = mz - gy0
-                if 0 <= local_i < crop_size and 0 <= local_j < crop_size:
-                    map_feat[2, local_i, local_j] = 1.0
+            if not (0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT):
+                continue
+
+            center_i = mx - gx0
+            center_j = mz - gy0
+            _paint_square(map_feat[2], center_i, center_j, radius=1, value=1.0)
 
         # 合法动作掩码 (8D)
         legal_action = [1] * 16
