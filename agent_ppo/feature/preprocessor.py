@@ -60,6 +60,9 @@ DIR8 = [
     (1, 1),    # 东南
 ]
 
+# 24 个扫描角：0, 15, 30, ..., 345
+SCAN_ANGLES_DEG = list(range(0, 360, 15))
+
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
 
@@ -272,31 +275,6 @@ class Preprocessor:
                 return dx * step, dz * step, True
         return 0, 0, False
 
-    def _move_safety(self, hero_x, hero_z, monster_positions):
-        """Compute 8-direction move safety.
-
-        计算 8 个普通移动方向的安全性特征。
-        """
-        hero_x = int(hero_x)
-        hero_z = int(hero_z)
-        move_scores = []
-
-        for dx, dz in DIR8:
-            nx = hero_x + dx
-            nz = hero_z + dz
-
-            if not self._is_global_passable(nx, nz):
-                move_scores.append(0.0)
-                continue
-
-            min_dist = min((np.hypot(nx - mx, nz - mz) for mx, mz in monster_positions), default=60.0)
-            open_len = self._open_length(hero_x, hero_z, dx, dz, max_len=6)
-
-            score = 0.7 * float(np.clip(min_dist / 35.0, 0.0, 1.0)) + 0.3 * float(open_len / 6.0)
-            move_scores.append(float(np.clip(score, 0.0, 1.0)))
-
-        return np.asarray(move_scores, dtype=np.float32)
-
     def _flash_safety(self, hero_x, hero_z, monster_positions):
         """Compute 8-direction flash safety.
 
@@ -343,6 +321,121 @@ class Preprocessor:
             flash_scores.append(float(np.clip(score, 0.0, 1.0)))
 
         return np.asarray(flash_scores, dtype=np.float32)
+    
+    def _is_known_wall(self, x, z):
+        """
+        已知墙：visibility=1 且 passable=0
+        """
+        if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
+            return True  # 出界直接视为墙，更保守
+        return bool(self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0)
+
+    def _is_unknown(self, x, z):
+        """
+        未知区域：visibility=0
+        """
+        if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
+            return False
+        return bool(self.visibility_map[x, z] == 0)
+
+    def _ray_collision_score(self, start_x, start_z, angle_deg, max_len=18, step_size=1.0):
+        """
+        从 (start_x, start_z) 朝 angle_deg 方向发射一条射线。
+        规则：
+        - 遇到 visibility=1 且 passable=0 -> 撞墙，返回 0
+        - 遇到 visibility=0 -> 停下，返回 1（未知，不判撞）
+        - 一直到 max_len 都没撞 -> 返回 1
+        """
+        theta = np.deg2rad(angle_deg)
+        dx = np.cos(theta)
+        dz = -np.sin(theta)   # 与你 DIR9_TO_VEC 的 z 方向保持一致：北是负 z
+
+        dist = step_size
+        while dist <= max_len:
+            x = int(round(start_x + dx * dist))
+            z = int(round(start_z + dz * dist))
+
+            if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
+                return 0.0
+
+            if self._is_unknown(x, z):
+                return 1.0
+
+            if self._is_known_wall(x, z):
+                return 0.0
+
+            dist += step_size
+
+        return 1.0
+
+    def _angle_diff_deg(self, a, b):
+        """
+        返回两个角度的最小夹角，范围 [0, 180]
+        """
+        d = abs(a - b) % 360
+        return min(d, 360 - d)
+
+    def _dir8_to_angle_deg(self, dx, dz):
+        """
+        DIR8 -> 角度
+        约定：
+        东=0, 东北=45, 北=90, 西北=135, 西=180, 西南=225, 南=270, 东南=315
+        注意这里 dz 轴向下为正，所以北对应 dz=-1
+        """
+        angle = np.degrees(np.arctan2(-dz, dx))
+        if angle < 0:
+            angle += 360
+        return float(angle)
+
+    def _move_safety(self, hero_x, hero_z, monster_positions=None):
+        """
+        基于 24 条角度射线的 8 方向 move safety。
+        对每个动作方向：
+        - 若下一步不可走，score=0
+        - 否则从下一步落点出发，扫描 24 个方向
+        - 用与动作方向夹角更近的射线赋更高权重
+        """
+        hero_x = int(hero_x)
+        hero_z = int(hero_z)
+        move_scores = []
+
+        for dx, dz in DIR8:
+            nx = hero_x + dx
+            nz = hero_z + dz
+
+            # 下一步本身不能走，直接不安全
+            if not self._is_global_passable(nx, nz):
+                move_scores.append(0.0)
+                continue
+
+            move_angle = self._dir8_to_angle_deg(dx, dz)
+
+            weighted_sum = 0.0
+            weight_total = 0.0
+
+            for scan_angle in SCAN_ANGLES_DEG:
+                ray_score = self._ray_collision_score(
+                    start_x=nx,
+                    start_z=nz,
+                    angle_deg=scan_angle,
+                    max_len=18,
+                    step_size=1.0,
+                )
+
+                # 与动作方向越接近，权重越高；90°之外不给权重
+                diff = self._angle_diff_deg(move_angle, scan_angle)
+                weight = max(0.0, np.cos(np.deg2rad(diff)))
+
+                weighted_sum += weight * ray_score
+                weight_total += weight
+
+            if weight_total <= 1e-6:
+                move_scores.append(0.0)
+            else:
+                score = weighted_sum / weight_total
+                move_scores.append(float(np.clip(score, 0.0, 1.0)))
+
+        return np.asarray(move_scores, dtype=np.float32)
 
     def _compute_abb_penalty(self, cur_hero_pos):
         """ABB penalty: punish staying inside a tiny axis-aligned box for too long.
