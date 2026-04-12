@@ -810,13 +810,10 @@ class Preprocessor:
             if self._line_blocked_by_known_wall(cur_hero_pos, m2):
                 r2 = 0.0
 
-        # 只在怪物可见时更新 last distance，避免视野外估计距离抖动
-        if m1[0] > 1e-6:
-            self.last_monster_dist_norm_1 = float(m1[4])
-        if m2[0] > 1e-6:
-            self.last_monster_dist_norm_2 = float(m2[4])
+        self.last_monster_dist_norm_1 = float(m1[4])
+        self.last_monster_dist_norm_2 = float(m2[4])
         
-        monster_dist_reward = r1 + 0.2 * r2
+        monster_dist_reward = r1 + r2
 
         # 稀疏奖励：如果 hero-monster 连线从“无遮挡”变成“有隔断”，给一次性大奖励
         los_break_reward = 0.0
@@ -828,7 +825,11 @@ class Preprocessor:
         if (not self.last_monster_blocked_1) and cur_blocked_1:
             los_break_reward += 1.0
         if (not self.last_monster_blocked_2) and cur_blocked_2:
-            los_break_reward += 0.5
+            los_break_reward += 1.0
+        if self.last_monster_blocked_1 and (not cur_blocked_1):
+            los_break_reward -= 1.0
+        if self.last_monster_blocked_2 and (not cur_blocked_2):
+            los_break_reward -= 1.0
 
         self.last_monster_blocked_1 = cur_blocked_1
         self.last_monster_blocked_2 = cur_blocked_2
@@ -903,7 +904,7 @@ class Preprocessor:
 
         reward_vector = [
             0.30 * score_gain,
-            survive_phase_weight * 0.02,
+            0.02 * survive_phase_weight,
             3.50 * dist_shaping_norm_weight * monster_dist_reward,
             0.50 * los_break_reward,
             5.00 * treasure_phase_weight * treasure_reward,
