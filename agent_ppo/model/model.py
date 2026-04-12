@@ -46,21 +46,21 @@ class Model(nn.Module):
             nn.ReLU(),
         )
 
-        # 地图分支: [B,1,21,21]
+        # 地图分支: [B,1,21,21]->[B,2,36,36]
         self.map_encoder = nn.Sequential(
-            nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(2, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2),   # 21 -> 10
+            nn.MaxPool2d(2),   # 36 -> 18
             nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(2),   # 10 -> 5
+            nn.MaxPool2d(2),   # 18 -> 9
             nn.Flatten(),
         )
 
         self.map_fc = nn.Sequential(
-            make_fc_layer(64 * 5 * 5, 128),
+            make_fc_layer(64 * 9 * 9, 128),
             nn.ReLU(),
         )
 

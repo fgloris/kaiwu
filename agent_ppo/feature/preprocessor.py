@@ -47,6 +47,35 @@ def _norm(v, v_max, v_min=0.0):
     v = float(np.clip(v, v_min, v_max))
     return (v - v_min) / (v_max - v_min) if (v_max - v_min) > 1e-6 else 0.0
 
+def _clip_window(x0, x1, y0, y1, size=MAP_SIZE_INT):
+    x0 = max(0, x0)
+    x1 = max(0, x1)
+    y0 = min(size, y0)
+    y1 = min(size, y1)
+    return x0, x1, y0, y1
+
+def _bucketize_left(x, num_bins, x_min=0.0, x_max=1.0):
+    """
+    将连续值桶化，并映射到所在桶的左端点。
+    例如:
+        x in [0.0, 0.2) -> 0.0
+        x in [0.2, 0.4) -> 0.2
+
+    参数:
+        x: float 或 numpy array
+        num_bins: 桶数，例如 5
+        x_min, x_max: 取值范围
+    """
+
+    x = np.asarray(x, dtype=np.float32)
+    x = np.clip(x, x_min, x_max)
+
+    step = (x_max - x_min) / float(num_bins)
+    # 处理 x == x_max 的边界
+    idx = np.floor((x - x_min) / step).astype(np.int32)
+    idx = np.clip(idx, 0, num_bins - 1)
+
+    return x_min + idx * step
 
 class Preprocessor:
     def __init__(self):
@@ -77,13 +106,6 @@ class Preprocessor:
         # 第二层：可见性地图：1=已知, 0=未知
         self.visibility_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
 
-    def clip_window(self, x0, x1, y0, y1, size=MAP_SIZE_INT):
-        x0 = max(0, x0)
-        x1 = max(0, x1)
-        y0 = min(size, y0)
-        y1 = min(size, y1)
-        return x0, x1, y0, y1
-
     def update_global_maps(self, hero_x, hero_y, map_info):
         """
         将 21x21 局部视野拼接到全局 memory。
@@ -101,7 +123,7 @@ class Preprocessor:
         x1 = x0 + h
         y1 = y0 + w
 
-        gx0, gx1, gy0, gy1 = self.clip_window(x0, x1, y0, y1, MAP_SIZE_INT)
+        gx0, gx1, gy0, gy1 = _clip_window(x0, x1, y0, y1, MAP_SIZE_INT)
 
         for i in range(h):
             for j in range(w):
@@ -174,7 +196,7 @@ class Preprocessor:
                     rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
 
                     raw_dist = np.sqrt(dx * dx + dz * dz)
-                    dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
+                    # dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
 
                     # 视野内时，用连续方向覆盖离散方向
                     if raw_dist > 1e-6:
