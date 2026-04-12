@@ -297,8 +297,8 @@ class Preprocessor:
         crop_size = 36
         half = crop_size // 2  # 18
 
-        gx0 = hero_pos['x'] - half
-        gy0 = hero_pos['z'] - half
+        gx0 = int(hero_pos['x'] - half)
+        gy0 = int(hero_pos['z'] - half)
         gx1 = gx0 + crop_size
         gy1 = gy0 + crop_size
 
