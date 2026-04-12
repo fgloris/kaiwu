@@ -24,7 +24,7 @@ class Config:
     ]
     VECTOR_FEATURE_LEN = sum(VECTOR_FEATURES)
 
-    # 局部地图大小：完整 21x21
+    # 局部地图大小：完整 36x36
     MAP_CHANNEL = 2
     MAP_SIZE = 36
 
