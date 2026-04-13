@@ -17,7 +17,8 @@ class Config:
         4,   # hero
         7,   # monster1
         7,   # monster2
-        8,   # move safety
+        8,   # ray collision
+        8,   # boundery cluster
         4,   # progress
     ]
     VECTOR_FEATURE_LEN = sum(VECTOR_FEATURES)

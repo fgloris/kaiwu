@@ -159,12 +159,12 @@ def _log_gray_map_as_binary(logger, gray_map, title="map36"):
     s = "".join("1" if v > 0 else "0" for v in arr.reshape(-1))
     logger.warning(f"[{title}]{s}")
 
-def _log_passable_map_and_rays(logger, gray_map, global_rays, move_scores, step_no=None, title="move_debug"):
+def _log_passable_map_and_ray_collision(logger, gray_map, global_rays, ray_collision_scores, step_no=None, title="ray_collision_debug"):
     """
     精简日志：
     1. map: 36x36 passable map 压平
     2. rays: 全局 rays 的 [angle, score]
-    3. move_scores: 8个动作方向分数
+    3. ray_collision_scores: 8个动作方向分数
     """
     if logger is None:
         return
@@ -182,13 +182,13 @@ def _log_passable_map_and_rays(logger, gray_map, global_rays, move_scores, step_
             round(float(ray["score"]), 4),
         ])
 
-    move_scores_list = [round(float(x), 4) for x in move_scores]
+    ray_collision_scores_list = [round(float(x), 4) for x in ray_collision_scores]
 
     payload = {
         "step": None if step_no is None else int(step_no),
         "map": map_bits,
         "rays": rays,
-        "move_scores": move_scores_list,
+        "ray_collision_scores": ray_collision_scores_list,
     }
 
     logger.warning(f"[{title}]{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}")
@@ -204,8 +204,8 @@ class Preprocessor:
 
         self.last_monster_dist_norm_1 = -1.0
         self.last_monster_dist_norm_2 = -1.0
-        self.last_monster_blocked_1 = False
-        self.last_monster_blocked_2 = False
+        self.last_monster_invisible_1 = False
+        self.last_monster_invisible_2 = False
 
         self.last_total_score = 0.0
         self.last_flash_count = 0
@@ -381,7 +381,7 @@ class Preprocessor:
             })
         return rays
     
-    def _score_move_from_rays(self, move_angle, rays, angle_window=30.0):
+    def _score_ray_collision_direction_from_rays(self, move_angle, rays, angle_window=30.0):
         """
         用统一的一组全局 rays，对某个 move_angle 打分。
         只看 ±angle_window 内的 rays，按角度差线性加权。
@@ -415,9 +415,9 @@ class Preprocessor:
 
         return move_score, matched_rays
 
-    def _move_safety(self, hero_x, hero_z, monster_positions=None, return_debug=False):
+    def _ray_collision_direction_scores(self, hero_x, hero_z, return_debug=False):
         """
-        基于一组全局 rays 的 8 方向 move safety。
+        基于一组全局 rays 的 8 方向 ray collision 分数。
         1. 从 hero 当前位置统一发射一组全局 rays（0,15,...,345），每根只算一次
         2. 对每个动作方向：
         - 若下一步不可走，score=0
@@ -435,7 +435,7 @@ class Preprocessor:
             step_size=1.0,
         )
 
-        move_scores = []
+        ray_collision_scores = []
         debug_infos = []
 
         for dx, dz in DIR8:
@@ -449,28 +449,207 @@ class Preprocessor:
 
             # 下一步本身不能走，则该方向直接为 0
             if not self._is_global_passable(nx, nz):
-                move_scores.append(0.0)
+                ray_collision_scores.append(0.0)
                 debug_infos.append(action_debug)
                 continue
 
             move_angle = self._dir8_to_angle_deg(dx, dz)
-            move_score, matched_rays = self._score_move_from_rays(
+            ray_collision_score, matched_rays = self._score_ray_collision_direction_from_rays(
                 move_angle=move_angle,
                 rays=global_rays,
                 angle_window=30.0,
             )
 
-            action_debug["score"] = move_score
+            action_debug["score"] = ray_collision_score
             action_debug["rays"] = matched_rays
 
-            move_scores.append(move_score)
+            ray_collision_scores.append(ray_collision_score)
             debug_infos.append(action_debug)
 
-        move_scores = np.asarray(move_scores, dtype=np.float32)
+        ray_collision_scores = np.asarray(ray_collision_scores, dtype=np.float32)
 
         if return_debug:
-            return move_scores, debug_infos, global_rays
-        return move_scores
+            return ray_collision_scores, debug_infos, global_rays
+        return ray_collision_scores
+
+
+    def _extract_local_passable_patch(self, map_info):
+        """
+        从当前 21x21 视野中提取局部可通行二值图。
+        约定：非 0 为可通行，0 为障碍。
+        """
+        local_passable = np.zeros((LOCAL_MAP_SIZE, LOCAL_MAP_SIZE), dtype=np.uint8)
+        if map_info is None:
+            return local_passable
+
+        h = min(LOCAL_MAP_SIZE, len(map_info))
+        w = min(LOCAL_MAP_SIZE, len(map_info[0])) if h > 0 else 0
+        for i in range(h):
+            for j in range(w):
+                local_passable[i, j] = 1 if int(map_info[i][j]) != 0 else 0
+        return local_passable
+
+    def _get_boundary_passable_points(self, local_passable):
+        """
+        提取 21x21 局部图边框上的所有可通行点。
+        坐标采用 (x, y) = (列, 行)。
+        """
+        pts = []
+        h, w = local_passable.shape
+
+        for x in range(w):
+            if local_passable[0, x] > 0:
+                pts.append((x, 0))
+            if h > 1 and local_passable[h - 1, x] > 0:
+                pts.append((x, h - 1))
+
+        for y in range(1, h - 1):
+            if local_passable[y, 0] > 0:
+                pts.append((0, y))
+            if w > 1 and local_passable[y, w - 1] > 0:
+                pts.append((w - 1, y))
+
+        return pts
+
+    def _cluster_boundary_points(self, boundary_pts):
+        """
+        对边框可通行点按 8 邻接进行聚类。
+        boundary_pts 中坐标采用 (x, y)。
+        """
+        if not boundary_pts:
+            return []
+
+        pts_set = set(boundary_pts)
+        visited = set()
+        clusters = []
+
+        for seed in boundary_pts:
+            if seed in visited:
+                continue
+
+            queue = deque([seed])
+            visited.add(seed)
+            cluster = []
+
+            while queue:
+                x, y = queue.popleft()
+                cluster.append((x, y))
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        nxt = (x + dx, y + dy)
+                        if nxt in pts_set and nxt not in visited:
+                            visited.add(nxt)
+                            queue.append(nxt)
+
+            clusters.append(cluster)
+
+        return clusters
+
+    def _compute_local_connected_mask(self, local_passable, start_x=LOCAL_MAP_HALF, start_y=LOCAL_MAP_HALF):
+        """
+        在 21x21 局部图中，从 agent 中心位置出发做 8 邻接 BFS，
+        返回与 agent 连通的可通行 mask。
+        坐标采用 (x, y) = (列, 行)。
+        """
+        h, w = local_passable.shape
+        connected = np.zeros((h, w), dtype=np.uint8)
+
+        if not (0 <= start_x < w and 0 <= start_y < h):
+            return connected
+        if local_passable[start_y, start_x] == 0:
+            return connected
+
+        queue = deque([(start_x, start_y)])
+        connected[start_y, start_x] = 1
+
+        while queue:
+            x, y = queue.popleft()
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    nx = x + dx
+                    ny = y + dy
+                    if not (0 <= nx < w and 0 <= ny < h):
+                        continue
+                    if connected[ny, nx] > 0:
+                        continue
+                    if local_passable[ny, nx] == 0:
+                        continue
+                    connected[ny, nx] = 1
+                    queue.append((nx, ny))
+
+        return connected
+
+    def _compute_boundary_cluster_direction_scores(self, local_passable):
+        """
+        基于 21x21 局部图：
+        1. 提取边框可通行点
+        2. 对边框点做 8 邻接聚类
+        3. 仅保留与 agent 中心连通的簇
+        4. 将连通簇中心对 8 个动作方向做余弦相似度投影，得到 8 维方向分数
+        """
+        boundary_pts = self._get_boundary_passable_points(local_passable)
+        clusters = self._cluster_boundary_points(boundary_pts)
+        connected_mask = self._compute_local_connected_mask(local_passable)
+
+        agent_x = float(LOCAL_MAP_HALF)
+        agent_y = float(LOCAL_MAP_HALF)
+        dir_scores = np.zeros(len(DIR8), dtype=np.float32)
+
+        connected_clusters = []
+        total_connected_weight = 0.0
+
+        for cluster in clusters:
+            is_connected = any(connected_mask[y, x] > 0 for x, y in cluster)
+            if not is_connected:
+                continue
+
+            xs = np.asarray([p[0] for p in cluster], dtype=np.float32)
+            ys = np.asarray([p[1] for p in cluster], dtype=np.float32)
+            cx = float(xs.mean())
+            cy = float(ys.mean())
+
+            vx = cx - agent_x
+            vy = cy - agent_y
+            dist = float(np.hypot(vx, vy))
+            if dist <= 1e-6:
+                continue
+
+            uvx = vx / dist
+            uvy = vy / dist
+            size_weight = float(np.clip(len(cluster) / 3.0, 0.0, 1.0))
+            if size_weight <= 1e-6:
+                continue
+
+            total_connected_weight += size_weight
+            connected_clusters.append({
+                "center": (cx, cy),
+                "size": len(cluster),
+                "dist": dist,
+            })
+
+            for i, (dx, dz) in enumerate(DIR8):
+                dir_vec = np.asarray([float(dx), float(dz)], dtype=np.float32)
+                dir_norm = float(np.linalg.norm(dir_vec))
+                if dir_norm <= 1e-6:
+                    continue
+                align = float((uvx * dir_vec[0] + uvy * dir_vec[1]) / dir_norm)
+                if align > 0.0:
+                    dir_scores[i] += align * size_weight
+
+        if total_connected_weight > 1e-6:
+            dir_scores /= total_connected_weight
+
+        dir_scores = np.clip(dir_scores, 0.0, 1.0).astype(np.float32)
+        return dir_scores, {
+            "boundary_pts": boundary_pts,
+            "clusters": clusters,
+            "connected_clusters": connected_clusters,
+        }
+
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -588,28 +767,19 @@ class Preprocessor:
             center_j = mz - gy0
             _paint_square(map_feat[2], center_i, center_j, radius=1, value=1.0)
 
-        # 基于全局记忆 + 怪物估计位置，计算 move / flash safety
-        # 基于全局记忆 + 怪物估计位置，计算 move safety
-        monster_positions = []
-        for m in monsters[:2]:
-            mx, mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
-            if 0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT:
-                monster_positions.append((mx, mz))
-
-        move_safety_feat, _move_debug_infos, _global_rays = self._move_safety(
+        ray_collision_feat, _ray_collision_debug_infos, _global_rays = self._ray_collision_direction_scores(
             hero_pos["x"],
             hero_pos["z"],
-            monster_positions,
-            return_debug=True,
+            return_debug=False,
         )
 
-        # _log_passable_map_and_rays(
+        # _log_passable_map_and_ray_collision(
         #     self.logger,
         #     map_feat[0],
         #     global_rays,
-        #     move_safety_feat,
+        #     ray_collision_feat,
         #     step_no=self.step_no,
-        #     title="move_debug",
+        #     title="ray_collision_debug",
         # )
 
         # 合法动作掩码 (16D)，仅用于 action masking，不再直接拼入 observation 向量
@@ -636,15 +806,21 @@ class Preprocessor:
         time_before_mounster_speedup = _norm(max(0, monster_speedup_time - self.step_no), self.max_step)
         progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, time_before_mounster_speedup], dtype=np.float32)
 
+        # 基于当前 21x21 绝对已知区域，提取边缘连通簇的 8 方向余弦投影特征
+        local_passable_21 = self._extract_local_passable_patch(map_info)
+        boundary_cluster_feat, _boundary_cluster_debug = self._compute_boundary_cluster_direction_scores(
+            local_passable_21
+        )
+
         # Concatenate features / 拼接特征
-        # 这里用 move/flash safety 替换 legal_action 作为 observation 输入，
-        # 因此向量总维度保持不变：原先 16 维 legal_action -> 8+8 维 safety
+        # 新增一组 8 维边缘连通簇方向特征，放在 ray collision 特征之后
         vector_feat = np.concatenate(
             [
                 hero_feat,
                 monster_feats[0],
                 monster_feats[1],
-                move_safety_feat,
+                ray_collision_feat,
+                boundary_cluster_feat,
                 progress_feat,
             ]
         )
@@ -707,27 +883,29 @@ class Preprocessor:
         # 稠密奖励：在视野外时持续获得奖励
         los_break_reward = 0.0
 
-        cur_blocked_1 = bool(m1[0] > 1e-6)
-        cur_blocked_2 = bool(m2[0] > 1e-6)
+        cur_invisible_1 = bool(m1[0] < 1e-6)
+        cur_invisible_2 = bool(m2[0] < 1e-6)
 
-        if cur_blocked_1:
+        if cur_invisible_1:
             los_break_reward += 0.01
-        if (not self.last_monster_blocked_1) and cur_blocked_1:
+        if (not self.last_monster_invisible_1) and cur_invisible_1:
             los_break_reward += 1.0
-        if self.last_monster_blocked_1 and (not cur_blocked_1):
+        if self.last_monster_invisible_1 and (not cur_invisible_1):
             los_break_reward -= 0.5
 
         if second_exists:
-            if cur_blocked_2:
+            if cur_invisible_2:
                 los_break_reward += 0.01
-            if (not self.last_monster_blocked_2) and cur_blocked_2:
+            if (not self.last_monster_invisible_2) and cur_invisible_2:
                 los_break_reward += 1.0
-            if self.last_monster_blocked_2 and (not cur_blocked_2):
+            if self.last_monster_invisible_2 and (not cur_invisible_2):
                 los_break_reward -= 0.5
         
-        self.last_monster_blocked_1 = cur_blocked_1
+        self.last_monster_invisible_1 = cur_invisible_1
         if second_exists:
-            self.last_monster_blocked_2 = cur_blocked_2
+            self.last_monster_invisible_2 = cur_invisible_2
+        else:
+            self.last_monster_invisible_2 = False
         
         # 闪现释放奖励
         flash_reward = 0.0
