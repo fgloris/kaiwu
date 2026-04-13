@@ -210,13 +210,16 @@ class Preprocessor:
 
         self.last_total_score = 0.0
         self.last_flash_count = 0
+        self.last_safety_score = 0.0
+        self.last_trap_score = 0.0
+        self.last_progress_score = 0.0
 
         self.prev_hero_pos = None
+        self.recent_positions = deque(maxlen=24)
+        self.last_visit_step = np.full((MAP_SIZE_INT, MAP_SIZE_INT), -100000, dtype=np.int32)
 
-        # ========= 两层全局记忆 =========
-        # 第一层：可通行地图：1=可走, 0=不能走/未知
+        # ========= 全局记忆 =========
         self.passable_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
-        # 第二层：可见性地图：1=已知, 0=未知
         self.visibility_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
 
     def update_global_maps(self, hero_x, hero_y, map_info):
@@ -691,12 +694,225 @@ class Preprocessor:
             "connected_clusters": connected_clusters,
         }
 
+    def _count_frontier_neighbors(self, x, z):
+        frontier = 0
+        for dx, dz in DIR8:
+            nx = x + dx
+            nz = z + dz
+            if not (0 <= nx < MAP_SIZE_INT and 0 <= nz < MAP_SIZE_INT):
+                continue
+            if self.visibility_map[nx, nz] == 0:
+                frontier += 1
+        return frontier
+
+    def _cell_open_degree(self, x, z):
+        cnt = 0
+        for dx, dz in DIR8:
+            if self._is_global_passable(x + dx, z + dz):
+                cnt += 1
+        return cnt
+
+    def _bfs_local_area(self, start_x, start_z, radius=12):
+        if not self._is_global_passable(start_x, start_z):
+            return 0, 0, 0
+        x0 = max(0, int(start_x - radius))
+        x1 = min(MAP_SIZE_INT - 1, int(start_x + radius))
+        z0 = max(0, int(start_z - radius))
+        z1 = min(MAP_SIZE_INT - 1, int(start_z + radius))
+
+        q = deque([(int(start_x), int(start_z), 0)])
+        visited = {(int(start_x), int(start_z))}
+        area = 0
+        frontier = 0
+        max_depth = 0
+        while q:
+            x, z, d = q.popleft()
+            area += 1
+            max_depth = max(max_depth, d)
+            frontier += min(self._count_frontier_neighbors(x, z), 2)
+            for dx, dz in DIR8:
+                nx = x + dx
+                nz = z + dz
+                if not (x0 <= nx <= x1 and z0 <= nz <= z1):
+                    continue
+                if (nx, nz) in visited:
+                    continue
+                if not self._is_global_passable(nx, nz):
+                    continue
+                visited.add((nx, nz))
+                q.append((nx, nz, d + 1))
+        return area, frontier, max_depth
+
+    def _monster_danger_score(self, x, z, monster_feats):
+        danger = 0.0
+        for m in monster_feats[:2]:
+            dist_norm = float(m[4])
+            in_view = float(m[0])
+            dir_x = float(m[5])
+            dir_z = float(m[6])
+            rel_x = float(m[2]) * MAP_SIZE
+            rel_z = float(m[3]) * MAP_SIZE
+            approx_dist = max(1.0, float(np.hypot(rel_x, rel_z)))
+            proximity = 1.0 - np.clip(dist_norm, 0.0, 1.0)
+            base = 0.45 * proximity + 0.55 * np.clip((30.0 / approx_dist), 0.0, 1.0)
+            if in_view > 0.5:
+                base += 0.25
+            if abs(dir_x) + abs(dir_z) < 1e-6:
+                base *= 0.6
+            danger = max(danger, base)
+        return float(np.clip(danger, 0.0, 1.5))
+
+    def _compute_directional_escape_scores(self, hero_x, hero_z, monster_feats, legal_action, ray_collision_feat, boundary_cluster_feat):
+        move_scores = np.zeros(8, dtype=np.float32)
+        flash_scores = np.zeros(8, dtype=np.float32)
+        move_debug = []
+        current_area, current_frontier, current_depth = self._bfs_local_area(hero_x, hero_z, radius=12)
+        current_degree = self._cell_open_degree(hero_x, hero_z)
+        current_frontier_local = self._count_frontier_neighbors(hero_x, hero_z)
+        current_safety = 0.0
+
+        for i, (dx, dz) in enumerate(DIR8):
+            nx = hero_x + dx
+            nz = hero_z + dz
+            if legal_action[i] <= 0 or (not self._is_global_passable(nx, nz)):
+                move_scores[i] = 0.0
+                move_debug.append({"ok": False})
+                continue
+
+            area, frontier, depth = self._bfs_local_area(nx, nz, radius=12)
+            degree = self._cell_open_degree(nx, nz)
+            open_score = float(ray_collision_feat[i])
+            cluster_score = float(boundary_cluster_feat[i])
+            revisit_age = self.step_no - int(self.last_visit_step[nx, nz])
+            revisit_penalty = 1.0 - np.clip(revisit_age / 18.0, 0.0, 1.0)
+            frontier_local = self._count_frontier_neighbors(nx, nz)
+            area_gain = np.clip((area - current_area) / 48.0, -1.0, 1.0)
+            depth_gain = np.clip((depth - current_depth) / 12.0, -1.0, 1.0)
+            degree_term = np.clip((degree - 1) / 4.0, 0.0, 1.0)
+            frontier_term = np.clip((frontier_local + 0.35 * frontier) / 8.0, 0.0, 1.0)
+            trap_risk = np.clip((2.0 - degree) / 2.0, 0.0, 1.0)
+
+            score = (
+                0.28 * open_score
+                + 0.16 * cluster_score
+                + 0.24 * np.clip(area / 80.0, 0.0, 1.0)
+                + 0.12 * degree_term
+                + 0.18 * frontier_term
+                + 0.10 * np.clip(area_gain + depth_gain, -1.0, 1.0)
+                - 0.22 * revisit_penalty
+                - 0.16 * trap_risk
+            )
+            score = float(np.clip((score + 0.18) / 1.08, 0.0, 1.0))
+            move_scores[i] = score
+            move_debug.append({
+                "ok": True,
+                "area": area,
+                "frontier": frontier,
+                "depth": depth,
+                "degree": degree,
+                "trap_risk": trap_risk,
+                "revisit_penalty": revisit_penalty,
+                "score": score,
+            })
+
+        current_safety = float(
+            np.clip(
+                0.35 * np.clip(current_area / 80.0, 0.0, 1.0)
+                + 0.25 * np.clip(current_degree / 4.0, 0.0, 1.0)
+                + 0.20 * np.clip((current_frontier_local + current_frontier * 0.2) / 8.0, 0.0, 1.0)
+                + 0.20 * np.max(move_scores),
+                0.0,
+                1.0,
+            )
+        )
+        trap_score = float(np.clip(1.0 - (0.55 * current_safety + 0.25 * np.clip(current_degree / 4.0, 0.0, 1.0) + 0.20 * np.clip(current_area / 80.0, 0.0, 1.0)), 0.0, 1.0))
+
+        danger = self._monster_danger_score(hero_x, hero_z, monster_feats)
+
+        for i, (dx, dz) in enumerate(DIR8):
+            flash_legal = legal_action[8 + i] > 0
+            fx, fz, ok = self._flash_landing_offset(hero_x, hero_z, dx, dz)
+            if (not flash_legal) or (not ok):
+                flash_scores[i] = 0.0
+                continue
+            tx = hero_x + fx
+            tz = hero_z + fz
+            area, frontier, depth = self._bfs_local_area(tx, tz, radius=12)
+            degree = self._cell_open_degree(tx, tz)
+            revisit_age = self.step_no - int(self.last_visit_step[tx, tz])
+            revisit_penalty = 1.0 - np.clip(revisit_age / 18.0, 0.0, 1.0)
+            frontier_term = np.clip((self._count_frontier_neighbors(tx, tz) + 0.35 * frontier) / 8.0, 0.0, 1.0)
+            flash_gain = np.clip((area - current_area) / 48.0, -1.0, 1.0)
+            score = (
+                0.36 * np.clip(area / 80.0, 0.0, 1.0)
+                + 0.18 * np.clip(degree / 4.0, 0.0, 1.0)
+                + 0.14 * frontier_term
+                + 0.24 * np.clip(flash_gain + depth / 18.0, -1.0, 1.0)
+                - 0.22 * revisit_penalty
+            )
+            score = float(np.clip((score + 0.10) / 0.92, 0.0, 1.0))
+            if danger < 0.40 and score < 0.72:
+                score *= 0.2
+            flash_scores[i] = score
+
+        return move_scores, flash_scores, {
+            "current_safety": current_safety,
+            "trap_score": trap_score,
+            "danger": danger,
+            "current_area": current_area,
+            "current_degree": current_degree,
+            "current_frontier": current_frontier_local,
+            "move_debug": move_debug,
+        }
+
+    def _build_local_maps(self, hero_x, hero_z, monsters):
+        map_feat = np.zeros((4, VIEW_MAP_SIZE, VIEW_MAP_SIZE), dtype=np.float32)
+        crop_size = VIEW_MAP_SIZE
+        half = crop_size // 2
+        gx0 = int(hero_x - half)
+        gz0 = int(hero_z - half)
+
+        for i in range(crop_size):
+            for j in range(crop_size):
+                gx = gx0 + i
+                gz = gz0 + j
+                if not (0 <= gx < MAP_SIZE_INT and 0 <= gz < MAP_SIZE_INT):
+                    continue
+                passable = float(self.passable_map[gx, gz])
+                visible = float(self.visibility_map[gx, gz])
+                map_feat[0, i, j] = passable
+                if visible > 0.5 and passable > 0.5:
+                    age = self.step_no - int(self.last_visit_step[gx, gz])
+                    visit_decay = np.clip(1.0 - age / 24.0, 0.0, 1.0)
+                    frontier = 1.0 if self._count_frontier_neighbors(gx, gz) > 0 else 0.0
+                    map_feat[2, i, j] = visit_decay
+                    map_feat[3, i, j] = frontier
+        for m in monsters[:2]:
+            mx, mz = _estimate_monster_pos(hero_x, hero_z, m)
+            center_i = mx - gx0
+            center_j = mz - gz0
+            _paint_square(map_feat[1], center_i, center_j, radius=1, value=1.0)
+        return map_feat
+
+    def _apply_flash_gate(self, legal_action, danger, trap_score, move_scores, flash_scores):
+        gated = list(legal_action)
+        best_move = float(np.max(move_scores)) if len(move_scores) else 0.0
+        best_flash = float(np.max(flash_scores)) if len(flash_scores) else 0.0
+        allow_flash = (danger > 0.60) or (trap_score > 0.62) or (best_flash > best_move + 0.12)
+        if not allow_flash:
+            for i in range(8, 16):
+                gated[i] = 0
+        else:
+            for i in range(8):
+                if flash_scores[i] < max(0.50, best_flash - 0.18):
+                    gated[8 + i] = 0
+        if sum(gated) == 0:
+            gated = list(legal_action)
+        return gated
+
 
     def feature_process(self, env_obs, last_action):
-        """Process env_obs into feature vector, legal_action mask, and reward.
-
-        将 env_obs 转换为特征向量、合法动作掩码和即时奖励。
-        """
+        """Process env_obs into feature vector, local map, reward features and legal mask."""
         observation = env_obs["observation"]
         frame_state = observation["frame_state"]
         env_info = observation["env_info"]
@@ -706,122 +922,61 @@ class Preprocessor:
         self.step_no = observation["step_no"]
         self.max_step = env_info.get("max_step", 200)
 
-        # Hero self features (4D) / 英雄自身特征
         hero = frame_state["heroes"]
         hero_pos = hero["pos"]
-        hero_x_norm = _norm(hero_pos["x"], MAP_SIZE)
-        hero_z_norm = _norm(hero_pos["z"], MAP_SIZE)
-        flash_cd_norm = _norm(hero["flash_cooldown"], MAX_FLASH_CD)
-        buff_remain_norm = _norm(hero["buff_remaining_time"], MAX_BUFF_DURATION)
+        hero_x = int(hero_pos["x"])
+        hero_z = int(hero_pos["z"])
 
-        hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
+        hero_feat = np.array([
+            _norm(hero_x, MAP_SIZE),
+            _norm(hero_z, MAP_SIZE),
+            _norm(hero["flash_cooldown"], MAX_FLASH_CD),
+            _norm(hero["buff_remaining_time"], MAX_BUFF_DURATION),
+        ], dtype=np.float32)
 
-        # 怪物特征
         monsters = frame_state.get("monsters", [])
         monster_feats = []
-
         for i in range(2):
             if i < len(monsters):
                 m = monsters[i]
-
-                # 视野外时，hero_relative_direction 和 hero_l2_distance 仍然可用
                 is_in_view = float(m.get("is_in_view", 0))
                 m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED) if is_in_view else 0.0
-
-                rel_x = 0.0
-                rel_z = 0.0
-
-                # 先给默认值：视野外时只保留粗信息
                 dir_idx = int(m.get("hero_relative_direction", 0))
                 dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
-
                 dist_norm = _norm(m.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET)
-
+                rel_x = 0.0
+                rel_z = 0.0
                 if is_in_view:
                     m_pos = m["pos"]
-                    dx = float(m_pos["x"] - hero_pos["x"])
-                    dz = float(m_pos["z"] - hero_pos["z"])
-
-                    # 精细相对位置：保留正负号
+                    dx = float(m_pos["x"] - hero_x)
+                    dz = float(m_pos["z"] - hero_z)
                     rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
                     rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
-
-                    raw_dist = np.sqrt(dx * dx + dz * dz)
+                    raw_dist = float(np.hypot(dx, dz))
                     dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 10)
-
-                    # 视野内时，用连续方向覆盖离散方向
                     if raw_dist > 1e-6:
                         dir_x = dx / raw_dist
                         dir_z = dz / raw_dist
                 else:
-                    est_mx, est_mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
-                    dx = float(est_mx - hero_pos["x"])
-                    dz = float(est_mz - hero_pos["z"])
+                    est_mx, est_mz = _estimate_monster_pos(hero_x, hero_z, m)
+                    dx = float(est_mx - hero_x)
+                    dz = float(est_mz - hero_z)
                     rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
                     rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
-
-                monster_feats.append(
-                    np.array(
-                        [is_in_view, m_speed_norm, rel_x, rel_z, dist_norm, dir_x, dir_z],
-                        dtype=np.float32,
-                    )
-                )
+                monster_feats.append(np.array([is_in_view, m_speed_norm, rel_x, rel_z, dist_norm, dir_x, dir_z], dtype=np.float32))
             else:
                 monster_feats.append(np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32))
 
         if map_info is not None:
-            x0, x1, y0, y1 = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
+            self.update_global_maps(hero_x, hero_z, map_info)
 
-        map_feat = np.zeros((2, VIEW_MAP_SIZE, VIEW_MAP_SIZE), dtype=np.float32)
+        if 0 <= hero_x < MAP_SIZE_INT and 0 <= hero_z < MAP_SIZE_INT:
+            self.last_visit_step[hero_x, hero_z] = self.step_no
+            self.recent_positions.append((hero_x, hero_z))
 
-        crop_size = VIEW_MAP_SIZE
-        half = crop_size // 2  # 18
+        map_feat = self._build_local_maps(hero_x, hero_z, monsters)
+        ray_collision_feat = self._ray_collision_direction_scores(hero_x, hero_z, return_debug=False)
 
-        gx0 = int(hero_pos['x'] - half)
-        gy0 = int(hero_pos['z'] - half)
-        gx1 = gx0 + crop_size
-        gy1 = gy0 + crop_size
-
-        for i in range(crop_size):
-            for j in range(crop_size):
-                gx = gx0 + i
-                gy = gy0 + j
-                if 0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT:
-                    map_feat[0, i, j] = float(self.passable_map[gx, gy])
-        
-        # _log_gray_map_as_binary(self.logger, map_feat[0], title=f"map:{self.step_no}")
-        # _log_gray_map_as_binary(self.logger, map_feat[1], title=f"vis:{self.step_no}")
-
-        # 第二层：monster mask
-        # 规则：
-        # - 视野内：用精确位置
-        # - 视野外但怪物存在：用粗方向 + 桶距离估计位置
-        for m in monsters[:2]:
-            mx, mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
-
-            if not (0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT):
-                continue
-
-            center_i = mx - gx0
-            center_j = mz - gy0
-            _paint_square(map_feat[1], center_i, center_j, radius=1, value=1.0)
-
-        ray_collision_feat = self._ray_collision_direction_scores(
-            hero_pos["x"],
-            hero_pos["z"],
-            return_debug=False,
-        )
-
-        # _log_passable_map_and_ray_collision(
-        #     self.logger,
-        #     map_feat[0],
-        #     global_rays,
-        #     ray_collision_feat,
-        #     step_no=self.step_no,
-        #     title="ray_collision_debug",
-        # )
-
-        # 合法动作掩码 (16D)，仅用于 action masking，不再直接拼入 observation 向量
         legal_action = [1] * 16
         if isinstance(legal_act_raw, list) and legal_act_raw:
             if isinstance(legal_act_raw[0], bool):
@@ -830,152 +985,159 @@ class Preprocessor:
             else:
                 valid_set = {int(a) for a in legal_act_raw if int(a) < 16}
                 legal_action = [1 if j in valid_set else 0 for j in range(16)]
-
         if sum(legal_action) == 0:
             legal_action = [1] * 16
 
-        # 进度特征
-        step_norm = _norm(self.step_no, self.max_step)
-        progress_treasure_collect = _norm(int(hero.get("treasure_collected_count", 0)), 10)
-        monster_interval = env_info.get("monster_interval", 300)
-        time_before_second_mounster = _norm(max(0, monster_interval - self.step_no), self.max_step)
-        
-        monster_speedup_time = env_info.get("monster_speed_boost_step", 0)
-        if self.logger is not None:
-            self.logger.warning(f"env info: {env_info}, monster speedup time value:{monster_speedup_time}")
-        time_before_mounster_speedup = _norm(max(0, monster_speedup_time - self.step_no), self.max_step)
-        progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, time_before_mounster_speedup], dtype=np.float32)
-
-        # 基于当前 21x21 绝对已知区域，提取边缘连通簇的 8 方向余弦投影特征
         local_passable_21 = self._extract_local_passable_patch(map_info)
-        boundary_cluster_feat, _boundary_cluster_debug = self._compute_boundary_cluster_direction_scores(
-            local_passable_21
+        boundary_cluster_feat, _ = self._compute_boundary_cluster_direction_scores(local_passable_21)
+
+        move_prior_feat, flash_prior_feat, escape_debug = self._compute_directional_escape_scores(
+            hero_x, hero_z, monster_feats, legal_action, ray_collision_feat, boundary_cluster_feat
+        )
+        legal_action = self._apply_flash_gate(
+            legal_action,
+            danger=escape_debug["danger"],
+            trap_score=escape_debug["trap_score"],
+            move_scores=move_prior_feat,
+            flash_scores=flash_prior_feat,
         )
 
-        # Concatenate features / 拼接特征
-        # 新增一组 8 维边缘连通簇方向特征，放在 ray collision 特征之后
-        vector_feat = np.concatenate(
-            [
-                hero_feat,
-                monster_feats[0],
-                monster_feats[1],
-                ray_collision_feat,
-                boundary_cluster_feat,
-                progress_feat,
-            ]
-        )
+        step_norm = _norm(self.step_no, self.max_step)
+        time_ratio = _norm(max(0, env_info.get("monster_interval", 300) - self.step_no), self.max_step)
+        speedup_cfg = env_info.get("monster_speed_boost_step", env_info.get("monster_speedup", self.max_step))
+        speedup_ratio = _norm(max(0, speedup_cfg - self.step_no), self.max_step)
+        progress_feat = np.array([
+            step_norm,
+            _norm(int(hero.get("treasure_collected_count", 0)), 10),
+            float(np.clip(escape_debug["danger"], 0.0, 1.0)),
+            float(np.clip(escape_debug["trap_score"], 0.0, 1.0)),
+            time_ratio,
+            speedup_ratio,
+        ], dtype=np.float32)
+
+        vector_feat = np.concatenate([
+            hero_feat,
+            monster_feats[0],
+            monster_feats[1],
+            ray_collision_feat,
+            boundary_cluster_feat,
+            move_prior_feat,
+            flash_prior_feat,
+            progress_feat,
+        ])
 
         reward_feats = {
             "monster_feats": monster_feats,
-            "monster_feats_available": len(monsters),
-            "progress_feats": progress_feat,
-            "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
+            "hero_pos": (hero_x, hero_z),
             "prev_hero_pos": self.prev_hero_pos,
             "last_action": int(last_action),
+            "move_prior": move_prior_feat,
+            "flash_prior": flash_prior_feat,
+            "danger": float(escape_debug["danger"]),
+            "trap_score": float(escape_debug["trap_score"]),
+            "current_safety": float(escape_debug["current_safety"]),
+            "best_move_score": float(np.max(move_prior_feat)),
+            "best_flash_score": float(np.max(flash_prior_feat)),
+            "current_area": float(escape_debug["current_area"]),
+            "current_degree": float(escape_debug["current_degree"]),
         }
 
-        self.prev_hero_pos = (int(hero_pos["x"]), int(hero_pos["z"]))
-
+        self.prev_hero_pos = (hero_x, hero_z)
         return vector_feat, map_feat, reward_feats, legal_action
-    
+
     def calculate_reward(self, env_obs, reward_feats):
         self.total_train_steps += 1
-        # 1.若怪物在视野外，让模型跑得更远一点。                            --> 通过 monster dist shaping? 这个足以做到吗？
-        # 2.若怪物在视野内且附近有弯道，让模型尽快将其拉脱视野。             --> 加一点视野脱离奖励？monster dist shaping?
-        # 3.尽量不要撞墙。1.不要撞侧面的墙。2.不要走进死胡同。              --> 计算路径方向？
-        # 4.不要原地打转。                                               --> ABB惩罚？好像做不到。方向一致性惩罚？
-
-        # 基于比赛分数增量的奖励
         env_info = env_obs["observation"].get("env_info", {})
         cur_total_score = float(env_info.get("total_score", 0.0))
         score_gain = cur_total_score - self.last_total_score
         self.last_total_score = cur_total_score
-        
-        # 怪物 dist shaping
-        
-        second_exists = bool(reward_feats['progress_feats'][2] < 1e-6)
 
-        monster_dist_reward = 0.0
-        cur_hero_pos = reward_feats.get("hero_pos")
-
-        m1 = reward_feats['monster_feats'][0]
-        m2 = reward_feats['monster_feats'][1]
-        r1 = 0.0
-        r2 = 0.0
-
-        # monster 1
-        if self.last_monster_dist_norm_1 >= 0:
-            cur_dist_1 = float(m1[4])   # dist_norm
-            r1 = cur_dist_1 - self.last_monster_dist_norm_1
-
-        # monster 2
-        if second_exists:
-            if self.last_monster_dist_norm_2 >= 0:
-                cur_dist_2 = float(m2[4])   # dist_norm
-                r2 = cur_dist_2 - self.last_monster_dist_norm_2
-
-        self.last_monster_dist_norm_1 = float(m1[4])
-        if second_exists:
-            self.last_monster_dist_norm_2 = float(m2[4])
-        
-        monster_dist_reward = r1 + r2
-
-        # 稀疏奖励：如果 monster 从视野内变成视野外给奖励，从视野内变成视野外给轻惩罚
-        # 稠密奖励：在视野外时持续获得奖励
-        los_break_reward = 0.0
+        m1 = reward_feats["monster_feats"][0]
+        m2 = reward_feats["monster_feats"][1]
+        cur_dist_1 = float(m1[4])
+        cur_dist_2 = float(m2[4])
+        r1 = 0.0 if self.last_monster_dist_norm_1 < 0 else (cur_dist_1 - self.last_monster_dist_norm_1)
+        r2 = 0.0 if self.last_monster_dist_norm_2 < 0 else (cur_dist_2 - self.last_monster_dist_norm_2)
+        self.last_monster_dist_norm_1 = cur_dist_1
+        self.last_monster_dist_norm_2 = cur_dist_2
+        monster_dist_reward = 0.7 * r1 + 0.4 * r2
 
         cur_invisible_1 = bool(m1[0] < 1e-6)
         cur_invisible_2 = bool(m2[0] < 1e-6)
-
-        if cur_invisible_1:
-            los_break_reward += 0.01
+        los_break_reward = 0.0
         if (not self.last_monster_invisible_1) and cur_invisible_1:
-            los_break_reward += 1.0
+            los_break_reward += 0.35
         if self.last_monster_invisible_1 and (not cur_invisible_1):
-            los_break_reward -= 0.5
-
-        if second_exists:
-            if cur_invisible_2:
-                los_break_reward += 0.01
-            if (not self.last_monster_invisible_2) and cur_invisible_2:
-                los_break_reward += 1.0
-            if self.last_monster_invisible_2 and (not cur_invisible_2):
-                los_break_reward -= 0.5
-        
+            los_break_reward -= 0.18
+        if (not self.last_monster_invisible_2) and cur_invisible_2:
+            los_break_reward += 0.18
+        if self.last_monster_invisible_2 and (not cur_invisible_2):
+            los_break_reward -= 0.10
         self.last_monster_invisible_1 = cur_invisible_1
-        if second_exists:
-            self.last_monster_invisible_2 = cur_invisible_2
-        else:
-            self.last_monster_invisible_2 = False
-        
-        # 闪现释放奖励
-        flash_reward = 0.0
-        flash_count = env_info.get("flash_count", 0)
-        if (flash_count - self.last_flash_count) > 0:
-            flash_reward = los_break_reward + 0.5 * monster_dist_reward
-        self.last_flash_count = flash_count
+        self.last_monster_invisible_2 = cur_invisible_2
 
-        # 靠墙惩罚：只在 hero 周围 5x5 小窗口内查最近已知墙，减少计算量
-        near_wall_penalty = 0.0
+        cur_hero_pos = reward_feats.get("hero_pos")
+        prev_hero_pos = reward_feats.get("prev_hero_pos")
+        moved = 0.0
+        if (cur_hero_pos is not None) and (prev_hero_pos is not None):
+            moved = float(np.hypot(cur_hero_pos[0] - prev_hero_pos[0], cur_hero_pos[1] - prev_hero_pos[1]))
+        stall_penalty = -1.0 if moved < 0.5 else 0.0
+
+        revisit_penalty = 0.0
+        if cur_hero_pos is not None and len(self.recent_positions) >= 4:
+            repeats = sum(1 for p in list(self.recent_positions)[:-1] if p == cur_hero_pos)
+            revisit_penalty = -float(np.clip(repeats / 3.0, 0.0, 1.0))
+
+        safety_score = float(reward_feats.get("current_safety", 0.0))
+        trap_score = float(reward_feats.get("trap_score", 0.0))
+        danger = float(reward_feats.get("danger", 0.0))
+
+        safety_delta = safety_score - self.last_safety_score
+        trap_delta = self.last_trap_score - trap_score
+        progress_score = 0.6 * safety_score + 0.4 * reward_feats.get("best_move_score", 0.0)
+        progress_delta = progress_score - self.last_progress_score
+        self.last_safety_score = safety_score
+        self.last_trap_score = trap_score
+        self.last_progress_score = progress_score
+
+        wall_penalty = -float(np.clip(1.0 - reward_feats.get("best_move_score", 0.0), 0.0, 1.0)) * 0.5
         if cur_hero_pos is not None:
-            near_wall_penalty = self._compute_near_wall_penalty(
-                cur_hero_pos[0],
-                cur_hero_pos[1],
-                search_radius=2,
-            )
+            wall_penalty += 0.6 * self._compute_near_wall_penalty(cur_hero_pos[0], cur_hero_pos[1], search_radius=2)
 
-        survive_phase_weight = 1.00
+        flash_count = int(env_info.get("flash_count", 0))
+        used_flash = (flash_count - self.last_flash_count) > 0
+        self.last_flash_count = flash_count
+        flash_reward = 0.0
+        if used_flash:
+            flash_quality = float(reward_feats.get("best_flash_score", 0.0))
+            best_move = float(reward_feats.get("best_move_score", 0.0))
+            if danger > 0.55 or trap_score > 0.60:
+                flash_reward += 0.45 * max(0.0, flash_quality - best_move + 0.05)
+                flash_reward += 0.25 * max(0.0, trap_delta)
+                flash_reward += 0.20 * max(0.0, los_break_reward)
+            else:
+                flash_reward -= 0.35
+            if flash_quality < best_move + 0.03:
+                flash_reward -= 0.20
+        else:
+            if danger > 0.75 and reward_feats.get("best_flash_score", 0.0) > reward_feats.get("best_move_score", 0.0) + 0.18:
+                flash_reward -= 0.06
 
-        # final step reward vector
-        dist_shaping_norm_weight = 12.8
+        survive_reward = 0.015
+        danger_penalty = -0.12 * danger * max(0.0, trap_score - 0.45)
 
         reward_vector = [
-            0.30 * score_gain,
-            0.02 * survive_phase_weight,
-            3.50 * dist_shaping_norm_weight * monster_dist_reward,
-            0.50 * los_break_reward,
-            0.25 * flash_reward,
-            0.05 * near_wall_penalty,
+            0.25 * score_gain,
+            survive_reward,
+            0.90 * progress_delta,
+            0.55 * safety_delta,
+            0.60 * trap_delta,
+            0.12 * monster_dist_reward,
+            0.40 * los_break_reward,
+            0.45 * flash_reward,
+            0.22 * stall_penalty,
+            0.18 * revisit_penalty,
+            0.20 * wall_penalty,
+            danger_penalty,
         ]
-
-        return reward_vector, sum(reward_vector)
+        return reward_vector, float(sum(reward_vector))

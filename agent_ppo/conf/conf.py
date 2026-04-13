@@ -18,13 +18,15 @@ class Config:
         7,   # monster1
         7,   # monster2
         8,   # ray collision
-        8,   # boundery cluster
-        4,   # progress
+        8,   # boundary cluster
+        8,   # move safety prior
+        8,   # flash safety prior
+        6,   # progress / danger
     ]
     VECTOR_FEATURE_LEN = sum(VECTOR_FEATURES)
 
     # 局部地图大小：完整 21x21
-    MAP_CHANNEL = 2
+    MAP_CHANNEL = 4
     MAP_SIZE = 21
 
     # 兼容 SampleData 里的 obs 维度定义

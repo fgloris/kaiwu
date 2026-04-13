@@ -3,6 +3,11 @@ import torch.nn as nn
 from agent_ppo.conf.conf import Config
 
 
+MOVE_PRIOR_DIM = 8
+FLASH_PRIOR_DIM = 8
+PRIOR_TOTAL_DIM = MOVE_PRIOR_DIM + FLASH_PRIOR_DIM
+
+
 def make_fc_layer(in_features, out_features):
     fc = nn.Linear(in_features, out_features)
     nn.init.orthogonal_(fc.weight.data)
@@ -31,7 +36,7 @@ class ResidualBlock(nn.Module):
 class Model(nn.Module):
     def __init__(self, device=None):
         super().__init__()
-        self.model_name = "gorge_chase_cnn_v2"
+        self.model_name = "gorge_chase_cnn_v3_escape"
         self.device = device
 
         vector_dim = Config.VECTOR_FEATURE_LEN
@@ -39,21 +44,21 @@ class Model(nn.Module):
         value_num = Config.VALUE_NUM
 
         self.vector_encoder = nn.Sequential(
-            make_fc_layer(vector_dim, 128),
+            make_fc_layer(vector_dim, 160),
             nn.ReLU(),
-            make_fc_layer(128, 128),
+            make_fc_layer(160, 160),
             nn.ReLU(),
         )
 
         self.map_stem = nn.Sequential(
-            nn.Conv2d(2, 32, 3, padding=1),
+            nn.Conv2d(Config.MAP_CHANNEL, 32, 3, padding=1),
             nn.ReLU(),
         )
 
         self.map_stage1 = nn.Sequential(
             ResidualBlock(32),
             ResidualBlock(32),
-            nn.MaxPool2d(2),   # 36 -> 18
+            nn.MaxPool2d(2),
         )
 
         self.map_stage2 = nn.Sequential(
@@ -61,7 +66,7 @@ class Model(nn.Module):
             nn.ReLU(),
             ResidualBlock(64),
             ResidualBlock(64),
-            nn.MaxPool2d(2),   # 18 -> 9
+            nn.MaxPool2d(2),
         )
 
         self.map_stage3 = nn.Sequential(
@@ -72,12 +77,12 @@ class Model(nn.Module):
 
         self.map_pool = nn.AdaptiveAvgPool2d((3, 3))
         self.map_fc = nn.Sequential(
-            make_fc_layer(128 * 3 * 3, 128),
+            make_fc_layer(128 * 3 * 3, 160),
             nn.ReLU(),
         )
 
         self.fusion = nn.Sequential(
-            make_fc_layer(256, 256),
+            make_fc_layer(320, 256),
             nn.ReLU(),
             make_fc_layer(256, 256),
             nn.ReLU(),
@@ -100,7 +105,12 @@ class Model(nn.Module):
         )
 
         self.move_bias_head = nn.Sequential(
-            make_fc_layer(128, 64),
+            make_fc_layer(160, 64),
+            nn.ReLU(),
+            make_fc_layer(64, 8),
+        )
+        self.flash_bias_head = nn.Sequential(
+            make_fc_layer(160, 64),
             nn.ReLU(),
             make_fc_layer(64, 8),
         )
@@ -120,8 +130,16 @@ class Model(nn.Module):
         hidden = self.fusion(hidden)
 
         logits = self.actor_head(hidden)
+
         move_bias = self.move_bias_head(map_hidden)
-        logits[:, :8] = logits[:, :8] + move_bias
+        flash_bias = self.flash_bias_head(map_hidden)
+
+        priors = vector_obs[:, -PRIOR_TOTAL_DIM:]
+        move_prior = priors[:, :MOVE_PRIOR_DIM]
+        flash_prior = priors[:, MOVE_PRIOR_DIM:]
+
+        logits[:, :8] = logits[:, :8] + move_bias + 1.75 * move_prior
+        logits[:, 8:] = logits[:, 8:] + flash_bias + 1.25 * flash_prior
 
         value = self.critic_head(hidden)
         return logits, value
