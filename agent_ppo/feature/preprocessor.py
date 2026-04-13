@@ -21,11 +21,6 @@ LOCAL_MAP_SIZE = 21
 LOCAL_MAP_HALF = 10
 VIEW_MAP_SIZE = 36
 
-# Anti-box-behavior / ABB 停留惩罚参数
-ABB_WINDOW = 8          # 统计最近多少帧位置
-ABB_RADIUS = 2           # 若最近位置都落在半径 2 的小框内，则视为停留
-ABB_MAX_PENALTY = 0.25   # 最大 ABB 惩罚幅度
-
 # Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 5.0
 # Max distance bucket / 距离桶最大值
@@ -216,7 +211,6 @@ class Preprocessor:
         self.last_flash_count = 0
 
         self.prev_hero_pos = None
-        self.recent_positions = deque(maxlen=ABB_WINDOW)
 
         # ========= 两层全局记忆 =========
         # 第一层：可通行地图：1=可走, 0=不能走/未知
@@ -270,19 +264,6 @@ class Preprocessor:
         if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
             return False
         return bool(self.passable_map[x, z] > 0)
-
-    def _open_length(self, hero_x, hero_z, dx, dz, max_len=int(VIEW_MAP_SIZE*0.707)):
-        """
-        从当前位置沿 (dx, dz) 方向，统计连续可通行格数。
-        """
-        open_len = 0
-        while open_len <= max_len:
-            nx = round(hero_x + dx * open_len)
-            nz = round(hero_z + dz * open_len)
-            if not self._is_global_passable(nx, nz):
-                break
-            open_len += 1
-        return open_len
 
     def _flash_landing_offset(self, hero_x, hero_z, dx, dz):
         """Find the farthest valid flash landing cell in the given direction.
@@ -490,31 +471,6 @@ class Preprocessor:
         if return_debug:
             return move_scores, debug_infos, global_rays
         return move_scores
-
-    def _compute_abb_penalty(self, cur_hero_pos):
-        """ABB penalty: punish staying inside a tiny axis-aligned box for too long.
-
-        ABB 惩罚：若最近若干帧一直停留在一个很小的轴对齐包围盒内，则给予惩罚。
-        """
-        if cur_hero_pos is None:
-            return 0.0
-
-        self.recent_positions.append((int(cur_hero_pos[0]), int(cur_hero_pos[1])))
-
-        if len(self.recent_positions) < ABB_WINDOW:
-            return 0.0
-
-        xs = [p[0] for p in self.recent_positions]
-        zs = [p[1] for p in self.recent_positions]
-
-        span_x = max(xs) - min(xs)
-        span_z = max(zs) - min(zs)
-
-        if span_x <= 2 * ABB_RADIUS and span_z <= 2 * ABB_RADIUS:
-            tightness = 1.0 - max(span_x, span_z) / float(max(1, 2 * ABB_RADIUS))
-            return -ABB_MAX_PENALTY * float(np.clip(tightness, 0.0, 1.0))
-
-        return 0.0
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -780,10 +736,6 @@ class Preprocessor:
             flash_reward = los_break_reward + 0.5 * monster_dist_reward
         self.last_flash_count = flash_count
 
-        # ABB 停留惩罚：若最近若干帧一直困在一个小范围内，则惩罚
-        cur_hero_pos = reward_feats.get("hero_pos")
-        abb_penalty = self._compute_abb_penalty(cur_hero_pos)
-
         survive_phase_weight = 1.00
 
         # final step reward vector
@@ -795,7 +747,6 @@ class Preprocessor:
             3.50 * dist_shaping_norm_weight * monster_dist_reward,
             0.50 * los_break_reward,
             0.25 * flash_reward,
-            1.00 * abb_penalty,
         ]
 
         return reward_vector, sum(reward_vector)
