@@ -163,6 +163,11 @@ class Preprocessor:
         self.last_monster_invisible_1 = False
         self.last_monster_invisible_2 = False
 
+        self.last_offview_guidance_dist_1 = -1.0
+        self.last_offview_guidance_dist_2 = -1.0
+        self.last_offview_guidance_target_1 = None
+        self.last_offview_guidance_target_2 = None
+
         self.last_total_score = 0.0
         self.last_flash_count = 0
 
@@ -316,7 +321,7 @@ class Preprocessor:
 
             dist = float(np.hypot(off_x, off_z))
             max_dist = 8.0 if (dx != 0 and dz != 0) else 10.0
-            processed_feat[i] = float(np.clip(dist / max_dist, 0.0, 1.0))
+            processed_feat[i] = _norm(dist, max_dist)
 
         if sum(processed_mask) == 0:
             processed_mask = [1] * 16
@@ -718,6 +723,113 @@ class Preprocessor:
             "connected_clusters": connected_clusters,
         }
 
+    def _select_reachable_opposite_boundary_cluster(self, connected_clusters, monster_feat, angle_cos_threshold=0.0):
+        """
+        从所有“能到达”的 boundary clusters（即 connected_clusters）中，
+        选择一个与“怪物方向相反”最一致的 cluster。
+
+        monster_feat: [is_in_view, speed, rel_x, rel_z, dist_norm, dir_x, dir_z]
+        返回：
+            {
+                "center": (cx, cy),
+                "size": size,
+                "dist": agent 到该 cluster center 的局部距离,
+                "align": 与“远离怪物方向”的余弦相似度,
+            }
+            或 None
+        """
+        if not connected_clusters:
+            return None
+
+        mdx = float(monster_feat[5])
+        mdz = float(monster_feat[6])
+        mnorm = float(np.hypot(mdx, mdz))
+        if mnorm <= 1e-6:
+            return None
+
+        # 远离怪物方向 = -(hero->monster)
+        away_x = -mdx / mnorm
+        away_z = -mdz / mnorm
+
+        agent_x = float(LOCAL_MAP_HALF)
+        agent_y = float(LOCAL_MAP_HALF)
+
+        best = None
+        best_align = -1e9
+
+        for c in connected_clusters:
+            cx, cy = c["center"]
+            vx = float(cx - agent_x)
+            vy = float(cy - agent_y)
+            dist = float(np.hypot(vx, vy))
+            if dist <= 1e-6:
+                continue
+
+            uvx = vx / dist
+            uvy = vy / dist
+            align = float(uvx * away_x + uvy * away_z)
+
+            if align > best_align:
+                best_align = align
+                best = {
+                    "center": (float(cx), float(cy)),
+                    "size": int(c["size"]),
+                    "dist": float(dist),
+                    "align": float(align),
+                }
+
+        if best is None:
+            return None
+        if best["align"] < angle_cos_threshold:
+            return None
+        return best
+
+    def _compute_offview_guidance_reward(
+        self,
+        monster_feat,
+        connected_clusters,
+        last_dist_attr_name,
+        last_target_attr_name,
+        angle_cos_threshold=0.0,
+    ):
+        """
+        当怪物不在视野内时：
+        - 从所有可到达的 boundary clusters 中，选与“怪物方向相反”最一致的 cluster
+        - 以 hero 到该 cluster center 的距离减小量作为 reward
+
+        若目标 cluster 切换，则本帧不做 shaping，避免抖动。
+        """
+        is_in_view = bool(monster_feat[0] > 0.5)
+        if is_in_view:
+            setattr(self, last_dist_attr_name, -1.0)
+            setattr(self, last_target_attr_name, None)
+            return 0.0, None
+
+        target = self._select_reachable_opposite_boundary_cluster(
+            connected_clusters=connected_clusters,
+            monster_feat=monster_feat,
+            angle_cos_threshold=angle_cos_threshold,
+        )
+        if target is None:
+            setattr(self, last_dist_attr_name, -1.0)
+            setattr(self, last_target_attr_name, None)
+            return 0.0, None
+
+        cur_dist = float(target["dist"])
+        last_dist = float(getattr(self, last_dist_attr_name))
+        last_target = getattr(self, last_target_attr_name)
+        cur_target = tuple(round(v, 3) for v in target["center"])
+
+        reward = 0.0
+        if (last_target is not None) and (last_target != cur_target):
+            reward = 0.0
+        elif last_dist >= 0.0:
+            reward = last_dist - cur_dist
+
+        setattr(self, last_dist_attr_name, cur_dist)
+        setattr(self, last_target_attr_name, cur_target)
+        return reward, target
+
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -897,6 +1009,7 @@ class Preprocessor:
             "prev_hero_pos": self.prev_hero_pos,
             "last_action": int(last_action),
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
+            "connected_boundary_clusters": _boundary_cluster_debug["connected_clusters"],
         }
 
         self.prev_hero_pos = (int(hero_pos["x"]), int(hero_pos["z"]))
@@ -980,6 +1093,30 @@ class Preprocessor:
             flash_reward = los_break_reward + 0.5 * monster_dist_reward
         self.last_flash_count = flash_count
 
+        connected_boundary_clusters = reward_feats.get("connected_boundary_clusters", [])
+        offview_guidance_reward_1, _ = self._compute_offview_guidance_reward(
+            monster_feat=m1,
+            connected_clusters=connected_boundary_clusters,
+            last_dist_attr_name="last_offview_guidance_dist_1",
+            last_target_attr_name="last_offview_guidance_target_1",
+            angle_cos_threshold=0.0,
+        )
+
+        offview_guidance_reward_2 = 0.0
+        if second_exists:
+            offview_guidance_reward_2, _ = self._compute_offview_guidance_reward(
+                monster_feat=m2,
+                connected_clusters=connected_boundary_clusters,
+                last_dist_attr_name="last_offview_guidance_dist_2",
+                last_target_attr_name="last_offview_guidance_target_2",
+                angle_cos_threshold=0.0,
+            )
+        else:
+            self.last_offview_guidance_dist_2 = -1.0
+            self.last_offview_guidance_target_2 = None
+
+        offview_guidance_reward = offview_guidance_reward_1 + offview_guidance_reward_2
+
         # 靠墙惩罚：只在 hero 周围 5x5 小窗口内查最近已知墙，减少计算量
         near_wall_penalty = 0.0
         if cur_hero_pos is not None:
@@ -1006,6 +1143,7 @@ class Preprocessor:
             3.50 * dist_shaping_norm_weight * monster_dist_reward,
             0.50 * los_break_reward,
             0.25 * flash_reward,
+            0.20 * offview_guidance_reward,
             0.08 * near_wall_penalty,
             0.08 * explore_reward
         ]
