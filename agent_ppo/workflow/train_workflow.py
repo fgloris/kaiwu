@@ -163,6 +163,7 @@ class EpisodeRunner:
                 "r_monster_los_break_sum",
                 "r_flash_sum",
                 "r_wall_penalty_sum",
+                "r_exploration_sum",
             ]
             episode_reward_vec_sum = np.zeros(len(reward_vec_keys), dtype=np.float32)
 

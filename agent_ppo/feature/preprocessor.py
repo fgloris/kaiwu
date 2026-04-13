@@ -237,6 +237,7 @@ class Preprocessor:
         y1 = y0 + w
 
         gx0, gx1, gy0, gy1 = _clip_window(x0, x1, y0, y1, MAP_SIZE_INT)
+        newly_discovered_passable_count = 0
 
         for i in range(h):
             for j in range(w):
@@ -248,6 +249,9 @@ class Preprocessor:
                 # 文档定义：1=可通行，0=障碍
                 visible_val = 1
                 passable_val = 1 if int(map_info[i][j]) != 0 else 0
+
+                if int(self.visibility_map[gx, gy]) == 0 and int(map_info[i][j]) > 0:
+                    newly_discovered_passable_count += 1
 
                 self.visibility_map[gx, gy] = visible_val
                 self.passable_map[gx, gy] = passable_val
@@ -337,10 +341,8 @@ class Preprocessor:
 
         if min_dist <= 1.0 + 1e-6:
             return -1.0
-        elif min_dist <= 1.414:
-            return -0.514
-        elif min_dist <= 2.0 + 1e-6:
-            return -0.2
+        elif min_dist <= 3.0 + 1e-6:
+            return -np.exp(-np.log(5.0) * (dist - 1.0))
         return 0.0
 
     def _ray_collision_score(self, start_x, start_z, angle_deg, max_len=VIEW_MAP_SIZE/2, step_size=1.0):
@@ -770,7 +772,7 @@ class Preprocessor:
                 monster_feats.append(np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32))
 
         if map_info is not None:
-            x0, x1, y0, y1 = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
+            x0, x1, y0, y1, newly_discovered_passable_count = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
 
         map_feat = np.zeros((2, VIEW_MAP_SIZE, VIEW_MAP_SIZE), dtype=np.float32)
 
@@ -872,6 +874,7 @@ class Preprocessor:
             "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
             "prev_hero_pos": self.prev_hero_pos,
             "last_action": int(last_action),
+            "newly_discovered_passable_count": int(newly_discovered_passable_count),
         }
 
         self.prev_hero_pos = (int(hero_pos["x"]), int(hero_pos["z"]))
@@ -961,8 +964,14 @@ class Preprocessor:
             near_wall_penalty = self._compute_near_wall_penalty(
                 cur_hero_pos[0],
                 cur_hero_pos[1],
-                search_radius=2,
+                search_radius=3,
             )
+
+        # 探索奖励
+        newly_discovered_passable_count = reward_feats.get("newly_discovered_passable_count", 0)
+        if self.step_no <= 1:
+            explore_reward = 0.0
+        else: explore_reward = _norm(newly_discovered_passable_count, 40.0)
 
         survive_phase_weight = 1.00
 
@@ -975,7 +984,8 @@ class Preprocessor:
             3.50 * dist_shaping_norm_weight * monster_dist_reward,
             0.50 * los_break_reward,
             0.25 * flash_reward,
-            0.05 * near_wall_penalty,
+            0.08 * near_wall_penalty,
+            0.08 * explore_reward
         ]
 
         return reward_vector, sum(reward_vector)
