@@ -30,7 +30,7 @@ ActData = create_cls("ActData", action=None, d_action=None, prob=None, value=Non
 SampleData = create_cls(
     "SampleData",
     vector_obs=Config.VECTOR_FEATURE_LEN,
-    map_obs=Config.MAP_CHANNEL * Config.MAP_SIZE * Config.MAP_SIZE, # map_obs 先按 flatten 长度存，进模型前再 reshape 成 [B,2,36,36]
+    map_obs=Config.MAP_CHANNEL * Config.MAP_SIZE * Config.MAP_SIZE, # map_obs 先按 flatten 长度存，进模型前再 reshape 成 [B,2,21,21]
     legal_action=Config.ACTION_NUM,
     act=1,
     reward=Config.VALUE_NUM,

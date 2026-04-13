@@ -162,7 +162,7 @@ class EpisodeRunner:
                 "r_monster_dist_sum",
                 "r_monster_los_break_sum",
                 "r_flash_sum",
-                "r_abb_penalty_sum",
+                "r_wall_penalty_sum",
             ]
             episode_reward_vec_sum = np.zeros(len(reward_vec_keys), dtype=np.float32)
 
@@ -311,17 +311,18 @@ class EpisodeRunner:
         }
         return result
     
-    def run_validation(self):
+    def _run_validation_group(self, map_ids, metric_prefix):
+        eval_conf = self._make_eval_conf(map_ids)
         results = []
 
         for _ in range(self.val_episode_num):
-            r = self.run_one_eval_episode()
+            r = self.run_one_eval_episode(eval_conf=eval_conf)
             if r is not None:
                 results.append(r)
 
         if not results:
-            self.logger.info("[VAL] no valid results")
-            return
+            self.logger.info(f"[VAL-{metric_prefix}] no valid results for maps {map_ids}")
+            return None
 
         avg_total_score = np.mean([x["total_score"] for x in results])
         avg_treasure_score = np.mean([x["treasure_score"] for x in results])
@@ -334,7 +335,7 @@ class EpisodeRunner:
         term_rate = np.mean([1.0 if x["terminated"] else 0.0 for x in results])
 
         self.logger.info(
-            f"[VAL] episodes:{len(results)} "
+            f"[VAL-{metric_prefix}] maps:{map_ids} episodes:{len(results)} "
             f"avg_total_score:{avg_total_score:.2f} "
             f"avg_treasure_score:{avg_treasure_score:.2f} "
             f"avg_step_score:{avg_step_score:.2f} "
@@ -345,10 +346,22 @@ class EpisodeRunner:
             f"terminated_rate:{term_rate:.2%}"
         )
 
-        if self.monitor:
-            monitor_data = {
-                "eval_total_score": round(float(avg_total_score), 4),
-                "eval_treasure_score": round(float(avg_treasure_score), 4),
-                "eval_step_score": round(float(avg_step_score), 4),
-            }
+        return {
+            f"{metric_prefix}_total_score": round(float(avg_total_score), 4),
+            f"{metric_prefix}_treasure_score": round(float(avg_treasure_score), 4),
+            f"{metric_prefix}_step_score": round(float(avg_step_score), 4),
+        }
+
+    def run_validation(self):
+        monitor_data = {}
+
+        eval_12 = self._run_validation_group([1, 2], "eval_12")
+        if eval_12 is not None:
+            monitor_data.update(eval_12)
+
+        eval_910 = self._run_validation_group([9, 10], "eval_910")
+        if eval_910 is not None:
+            monitor_data.update(eval_910)
+
+        if self.monitor and monitor_data:
             self.monitor.put_data({os.getpid(): monitor_data})

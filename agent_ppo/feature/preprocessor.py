@@ -19,7 +19,7 @@ MAP_SIZE = 128.0
 MAP_SIZE_INT = 128
 LOCAL_MAP_SIZE = 21
 LOCAL_MAP_HALF = 10
-VIEW_MAP_SIZE = 36
+VIEW_MAP_SIZE = 21
 
 # Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 5.0
@@ -150,7 +150,7 @@ def _paint_square(mask, center_i, center_j, radius=1, value=1.0):
 
 def _log_gray_map_as_binary(logger, gray_map, title="map36"):
     """
-    将 36x36 灰度图压成单个 01 字符串，并一次 warning 输出。
+    将 21x21 灰度图压成单个 01 字符串，并一次 warning 输出。
     规则：>0 的都记为 1，因此 0.5 也会记成 1。
     """
     arr = np.asarray(gray_map)
@@ -162,7 +162,7 @@ def _log_gray_map_as_binary(logger, gray_map, title="map36"):
 def _log_passable_map_and_ray_collision(logger, gray_map, global_rays, ray_collision_scores, step_no=None, title="ray_collision_debug"):
     """
     精简日志：
-    1. map: 36x36 passable map 压平
+    1. map: 21x21 passable map 压平
     2. rays: 全局 rays 的 [angle, score]
     3. ray_collision_scores: 8个动作方向分数
     """
@@ -196,6 +196,7 @@ def _log_passable_map_and_ray_collision(logger, gray_map, global_rays, ray_colli
 class Preprocessor:
     def __init__(self, logger=None):
         self.logger = logger
+        self.total_train_steps = 0
         self.reset()
 
     def reset(self):
@@ -771,7 +772,7 @@ class Preprocessor:
         if map_info is not None:
             x0, x1, y0, y1 = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
 
-        map_feat = np.zeros((3, VIEW_MAP_SIZE, VIEW_MAP_SIZE), dtype=np.float32)
+        map_feat = np.zeros((2, VIEW_MAP_SIZE, VIEW_MAP_SIZE), dtype=np.float32)
 
         crop_size = VIEW_MAP_SIZE
         half = crop_size // 2  # 18
@@ -787,16 +788,14 @@ class Preprocessor:
                 gy = gy0 + j
                 if 0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT:
                     map_feat[0, i, j] = float(self.passable_map[gx, gy])
-                    map_feat[1, i, j] = float(self.visibility_map[gx, gy])
         
         # _log_gray_map_as_binary(self.logger, map_feat[0], title=f"map:{self.step_no}")
         # _log_gray_map_as_binary(self.logger, map_feat[1], title=f"vis:{self.step_no}")
 
-        # 第三层：monster mask
+        # 第二层：monster mask
         # 规则：
         # - 视野内：用精确位置
         # - 视野外但怪物存在：用粗方向 + 桶距离估计位置
-        # - 落在 36x36 crop 内则置 1
         for m in monsters[:2]:
             mx, mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
 
@@ -805,7 +804,7 @@ class Preprocessor:
 
             center_i = mx - gx0
             center_j = mz - gy0
-            _paint_square(map_feat[2], center_i, center_j, radius=1, value=1.0)
+            _paint_square(map_feat[1], center_i, center_j, radius=1, value=1.0)
 
         ray_collision_feat = self._ray_collision_direction_scores(
             hero_pos["x"],
@@ -880,6 +879,7 @@ class Preprocessor:
         return vector_feat, map_feat, reward_feats, legal_action
     
     def calculate_reward(self, env_obs, reward_feats):
+        self.total_train_steps += 1
         # 1.若怪物在视野外，让模型跑得更远一点。                            --> 通过 monster dist shaping? 这个足以做到吗？
         # 2.若怪物在视野内且附近有弯道，让模型尽快将其拉脱视野。             --> 加一点视野脱离奖励？monster dist shaping?
         # 3.尽量不要撞墙。1.不要撞侧面的墙。2.不要走进死胡同。              --> 计算路径方向？

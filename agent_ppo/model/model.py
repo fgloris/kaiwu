@@ -46,7 +46,7 @@ class Model(nn.Module):
         )
 
         self.map_stem = nn.Sequential(
-            nn.Conv2d(3, 32, 3, padding=1),
+            nn.Conv2d(2, 32, 3, padding=1),
             nn.ReLU(),
         )
 
