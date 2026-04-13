@@ -162,6 +162,7 @@ class EpisodeRunner:
                 "r_monster_dist_sum",
                 "r_monster_los_break_sum",
                 "r_flash_sum",
+                "r_offview_guidance_sum",
                 "r_wall_penalty_sum",
                 "r_exploration_sum",
             ]
