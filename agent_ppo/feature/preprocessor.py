@@ -302,6 +302,46 @@ class Preprocessor:
             return False
         return bool(self.visibility_map[x, z] == 0)
 
+
+    def _compute_near_wall_penalty(self, hero_x, hero_z, search_radius=2):
+        """
+        在 hero 周围 (2*search_radius+1)x(2*search_radius+1) 小窗口内，
+        计算到最近“已知墙”的欧氏距离，并返回靠墙惩罚。
+        惩罚规则：
+        - min_dist <= 1.0 -> 1.0
+        - 1.0 < min_dist <= 2.0 -> 0.2
+        - 其它 -> 0.0
+        """
+        hero_x = int(hero_x)
+        hero_z = int(hero_z)
+
+        min_dist = None
+        for dz in range(-search_radius, search_radius + 1):
+            for dx in range(-search_radius, search_radius + 1):
+                if dx == 0 and dz == 0:
+                    continue
+
+                x = hero_x + dx
+                z = hero_z + dz
+
+                if not self._is_known_wall(x, z):
+                    continue
+
+                dist = float(np.hypot(dx, dz))
+                if min_dist is None or dist < min_dist:
+                    min_dist = dist
+
+        if min_dist is None:
+            return 0.0
+
+        if min_dist <= 1.0 + 1e-6:
+            return -1.0
+        elif min_dist <= 1.414:
+            return -0.514
+        elif min_dist <= 2.0 + 1e-6:
+            return -0.2
+        return 0.0
+
     def _ray_collision_score(self, start_x, start_z, angle_deg, max_len=VIEW_MAP_SIZE/2, step_size=1.0):
         """
         从 (start_x, start_z) 朝 angle_deg 方向发射一条射线。
@@ -767,7 +807,7 @@ class Preprocessor:
             center_j = mz - gy0
             _paint_square(map_feat[2], center_i, center_j, radius=1, value=1.0)
 
-        ray_collision_feat, _ray_collision_debug_infos, _global_rays = self._ray_collision_direction_scores(
+        ray_collision_feat = self._ray_collision_direction_scores(
             hero_pos["x"],
             hero_pos["z"],
             return_debug=False,
@@ -802,7 +842,8 @@ class Preprocessor:
         time_before_second_mounster = _norm(max(0, monster_interval - self.step_no), self.max_step)
         
         monster_speedup_time = env_info.get("monster_speed_boost_step", 0)
-        self.logger.warning(f"env info: {env_info}, monster speedup time value:{monster_speedup_time}")
+        if self.logger is not None:
+            self.logger.warning(f"env info: {env_info}, monster speedup time value:{monster_speedup_time}")
         time_before_mounster_speedup = _norm(max(0, monster_speedup_time - self.step_no), self.max_step)
         progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, time_before_mounster_speedup], dtype=np.float32)
 
@@ -914,6 +955,15 @@ class Preprocessor:
             flash_reward = los_break_reward + 0.5 * monster_dist_reward
         self.last_flash_count = flash_count
 
+        # 靠墙惩罚：只在 hero 周围 5x5 小窗口内查最近已知墙，减少计算量
+        near_wall_penalty = 0.0
+        if cur_hero_pos is not None:
+            near_wall_penalty = self._compute_near_wall_penalty(
+                cur_hero_pos[0],
+                cur_hero_pos[1],
+                search_radius=2,
+            )
+
         survive_phase_weight = 1.00
 
         # final step reward vector
@@ -925,6 +975,7 @@ class Preprocessor:
             3.50 * dist_shaping_norm_weight * monster_dist_reward,
             0.50 * los_break_reward,
             0.25 * flash_reward,
+            0.05 * near_wall_penalty,
         ]
 
         return reward_vector, sum(reward_vector)

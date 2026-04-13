@@ -10,6 +10,7 @@ Training workflow for Gorge Chase PPO.
 峡谷追猎 PPO 训练工作流。
 """
 
+import copy
 import os
 import time
 
@@ -68,8 +69,59 @@ class EpisodeRunner:
         self.last_report_monitor_time = 0
         self.last_get_training_metrics_time = 0
 
+        self.monitor_report_interval = 2.0
         self.val_every_n_episode = 40
         self.val_episode_num = 10
+        self.train_score_window = []
+
+
+    def _append_train_score_window(self, total_score, treasure_score, step_score):
+        self.train_score_window.append({
+            "total_score": float(total_score),
+            "treasure_score": float(treasure_score),
+            "step_score": float(step_score),
+        })
+
+    def _report_train_monitor_if_needed(self, now, reward_value, step, episode_reward_vec_sum, reward_vec_keys, force=False):
+        if not self.monitor:
+            return
+        if not force and now - self.last_report_monitor_time < self.monitor_report_interval:
+            return
+        if not self.train_score_window:
+            return
+
+        total_scores = np.asarray([x["total_score"] for x in self.train_score_window], dtype=np.float32)
+        treasure_scores = np.asarray([x["treasure_score"] for x in self.train_score_window], dtype=np.float32)
+        step_scores = np.asarray([x["step_score"] for x in self.train_score_window], dtype=np.float32)
+
+        monitor_data = {
+            "reward": round(float(reward_value), 4),
+            "episode_steps": int(step),
+            "episode_cnt": int(self.episode_cnt),
+            "train_avg_total_score": round(float(np.mean(total_scores)), 4),
+            "train_avg_treasure_score": round(float(np.mean(treasure_scores)), 4),
+            "train_avg_step_score": round(float(np.mean(step_scores)), 4),
+            "train_min_total_score": round(float(np.min(total_scores)), 4),
+            "train_min_treasure_score": round(float(np.min(treasure_scores)), 4),
+            "train_min_step_score": round(float(np.min(step_scores)), 4),
+        }
+        for i, key in enumerate(reward_vec_keys):
+            monitor_data[key] = round(float(episode_reward_vec_sum[i]), 4)
+
+        self.monitor.put_data({os.getpid(): monitor_data})
+        self.last_report_monitor_time = now
+        self.train_score_window.clear()
+
+    def _make_eval_conf(self, map_ids):
+        eval_conf = copy.deepcopy(self.val_usr_conf)
+        if isinstance(eval_conf, dict):
+            if "env_conf" in eval_conf and isinstance(eval_conf["env_conf"], dict):
+                eval_conf["env_conf"]["map"] = list(map_ids)
+                eval_conf["env_conf"]["map_random"] = False
+            else:
+                eval_conf["map"] = list(map_ids)
+                eval_conf["map_random"] = False
+        return eval_conf
 
     def run_episodes(self):
         """Run a single episode and yield collected samples.
@@ -193,20 +245,18 @@ class EpisodeRunner:
                     train_treasure_score = float(env_info.get("treasure_score", 0.0))
                     train_step_score = float(env_info.get("step_score", 0.0))
 
-                    if now - self.last_report_monitor_time >= 20 and self.monitor:
-                        monitor_data = {
-                            "reward": round(total_reward + float(final_reward[0]), 4),
-                            "episode_steps": step,
-                            "episode_cnt": self.episode_cnt,
-
-                            "train_total_score": round(train_total_score, 4),
-                            "train_treasure_score": round(train_treasure_score, 4),
-                            "train_step_score": round(train_step_score, 4),
-                        }
-                        for i, key in enumerate(reward_vec_keys):
-                            monitor_data[key] = round(float(episode_reward_vec_sum[i]), 4)
-                        self.monitor.put_data({os.getpid(): monitor_data})
-                        self.last_report_monitor_time = now
+                    self._append_train_score_window(
+                        train_total_score,
+                        train_treasure_score,
+                        train_step_score,
+                    )
+                    self._report_train_monitor_if_needed(
+                        now=now,
+                        reward_value=total_reward + float(final_reward[0]),
+                        step=step,
+                        episode_reward_vec_sum=episode_reward_vec_sum,
+                        reward_vec_keys=reward_vec_keys,
+                    )
 
                     if self.episode_cnt % self.val_every_n_episode == 0:
                         self.logger.info(f"[VAL] start validation at episode {self.episode_cnt}")
@@ -221,8 +271,10 @@ class EpisodeRunner:
                 obs_data = _obs_data
                 remain_info = _remain_info
 
-    def run_one_eval_episode(self):
-        env_obs = self.env.reset(self.val_usr_conf)
+    def run_one_eval_episode(self, eval_conf=None):
+        if eval_conf is None:
+            eval_conf = self.val_usr_conf
+        env_obs = self.env.reset(eval_conf)
 
         if handle_disaster_recovery(env_obs, self.logger):
             return None
