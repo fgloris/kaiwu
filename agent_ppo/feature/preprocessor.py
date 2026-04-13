@@ -148,51 +148,6 @@ def _paint_square(mask, center_i, center_j, radius=1, value=1.0):
             if 0 <= ii < h and 0 <= jj < w:
                 mask[ii, jj] = value
 
-def _log_gray_map_as_binary(logger, gray_map, title="map36"):
-    """
-    将 21x21 灰度图压成单个 01 字符串，并一次 warning 输出。
-    规则：>0 的都记为 1，因此 0.5 也会记成 1。
-    """
-    arr = np.asarray(gray_map)
-    assert arr.shape == (VIEW_MAP_SIZE, VIEW_MAP_SIZE), f"expect ({VIEW_MAP_SIZE},{VIEW_MAP_SIZE}), got {arr.shape}"
-
-    s = "".join("1" if v > 0 else "0" for v in arr.reshape(-1))
-    logger.warning(f"[{title}]{s}")
-
-def _log_passable_map_and_ray_collision(logger, gray_map, global_rays, ray_collision_scores, step_no=None, title="ray_collision_debug"):
-    """
-    精简日志：
-    1. map: 21x21 passable map 压平
-    2. rays: 全局 rays 的 [angle, score]
-    3. ray_collision_scores: 8个动作方向分数
-    """
-    if logger is None:
-        return
-
-    arr = np.asarray(gray_map)
-    assert arr.shape == (VIEW_MAP_SIZE, VIEW_MAP_SIZE), \
-        f"expect ({VIEW_MAP_SIZE},{VIEW_MAP_SIZE}), got {arr.shape}"
-
-    map_bits = "".join("1" if v > 0 else "0" for v in arr.reshape(-1))
-
-    rays = []
-    for ray in global_rays:
-        rays.append([
-            int(round(float(ray["angle"]))),
-            round(float(ray["score"]), 4),
-        ])
-
-    ray_collision_scores_list = [round(float(x), 4) for x in ray_collision_scores]
-
-    payload = {
-        "step": None if step_no is None else int(step_no),
-        "map": map_bits,
-        "rays": rays,
-        "ray_collision_scores": ray_collision_scores_list,
-    }
-
-    logger.warning(f"[{title}]{json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}")
-
 class Preprocessor:
     def __init__(self, logger=None):
         self.logger = logger
@@ -704,6 +659,7 @@ class Preprocessor:
         env_info = observation["env_info"]
         map_info = observation["map_info"]
         legal_act_raw = observation["legal_action"]
+        self.logger.warning(f"legal_action: {legal_act_raw}")
 
         self.step_no = observation["step_no"]
         self.max_step = env_info.get("max_step", 200)
@@ -823,7 +779,7 @@ class Preprocessor:
         #     title="ray_collision_debug",
         # )
 
-        # 合法动作掩码 (16D)，仅用于 action masking，不再直接拼入 observation 向量
+        # 合法动作掩码 (16D)，仅用于 action masking，不直接拼入 observation 向量
         legal_action = [1] * 16
         if isinstance(legal_act_raw, list) and legal_act_raw:
             if isinstance(legal_act_raw[0], bool):
@@ -843,8 +799,8 @@ class Preprocessor:
         time_before_second_mounster = _norm(max(0, monster_interval - self.step_no), self.max_step)
         
         monster_speedup_time = env_info.get("monster_speed_boost_step", 0)
-        if self.logger is not None:
-            self.logger.warning(f"env info: {env_info}, monster speedup time value:{monster_speedup_time}")
+        #if self.logger is not None:
+        #    self.logger.warning(f"env info: {env_info}, monster speedup time value:{monster_speedup_time}")
         time_before_mounster_speedup = _norm(max(0, monster_speedup_time - self.step_no), self.max_step)
         progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, time_before_mounster_speedup], dtype=np.float32)
 
