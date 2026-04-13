@@ -372,7 +372,7 @@ class Preprocessor:
         if min_dist <= 1.0 + 1e-6:
             return -1.0
         elif min_dist <= 3.0 + 1e-6:
-            return -np.exp(-np.log(5.0) * (dist - 1.0))
+            return -np.exp(-np.log(5.0) * (min_dist - 1.0))
         return 0.0
 
     def _ray_collision_score(self, start_x, start_z, angle_deg, max_len=VIEW_MAP_SIZE/2, step_size=1.0):
@@ -784,20 +784,43 @@ class Preprocessor:
             return None
         return best
 
+    def _action_to_dir_vec(self, action_idx):
+        """
+        将动作索引映射成 8 方向单位向量。
+        - 0~7: 普通移动
+        - 8~15: 闪现，方向仍按 action-8 映射
+        返回: (ux, uz) 或 None
+        """
+        if action_idx is None:
+            return None
+
+        action_idx = int(action_idx)
+        if 0 <= action_idx < 8:
+            dx, dz = DIR8[action_idx]
+        elif 8 <= action_idx < 16:
+            dx, dz = DIR8[action_idx - 8]
+        else:
+            return None
+
+        norm = float(np.hypot(dx, dz))
+        if norm <= 1e-6:
+            return None
+        return float(dx / norm), float(dz / norm)
+
     def _compute_offview_guidance_reward(
         self,
         monster_feat,
         connected_clusters,
         last_dist_attr_name,
         last_target_attr_name,
+        last_action,
         angle_cos_threshold=0.0,
     ):
         """
         当怪物不在视野内时：
         - 从所有可到达的 boundary clusters 中，选与“怪物方向相反”最一致的 cluster
-        - 以 hero 到该 cluster center 的距离减小量作为 reward
-
-        若目标 cluster 切换，则本帧不做 shaping，避免抖动。
+        - 不再使用 hero 到 cluster center 的距离减小量
+        - 改为：上一帧动作方向 与 当前目标 cluster 方向 的余弦相似度
         """
         is_in_view = bool(monster_feat[0] > 0.5)
         if is_in_view:
@@ -815,18 +838,32 @@ class Preprocessor:
             setattr(self, last_target_attr_name, None)
             return 0.0, None
 
-        cur_dist = float(target["dist"])
-        last_dist = float(getattr(self, last_dist_attr_name))
-        last_target = getattr(self, last_target_attr_name)
+        action_vec = self._action_to_dir_vec(last_action)
         cur_target = tuple(round(v, 3) for v in target["center"])
+        if action_vec is None:
+            setattr(self, last_dist_attr_name, -1.0)
+            setattr(self, last_target_attr_name, cur_target)
+            return 0.0, target
 
-        reward = 0.0
-        if (last_target is not None) and (last_target != cur_target):
-            reward = 0.0
-        elif last_dist >= 0.0:
-            reward = last_dist - cur_dist
+        agent_x = float(LOCAL_MAP_HALF)
+        agent_y = float(LOCAL_MAP_HALF)
+        cx, cy = target["center"]
+        vx = float(cx - agent_x)
+        vy = float(cy - agent_y)
+        vnorm = float(np.hypot(vx, vy))
+        if vnorm <= 1e-6:
+            setattr(self, last_dist_attr_name, -1.0)
+            setattr(self, last_target_attr_name, cur_target)
+            return 0.0, target
 
-        setattr(self, last_dist_attr_name, cur_dist)
+        target_dir_x = vx / vnorm
+        target_dir_y = vy / vnorm
+        act_x, act_y = action_vec
+        cos_sim = float(act_x * target_dir_x + act_y * target_dir_y)
+
+        reward = max(0.0, cos_sim)
+
+        setattr(self, last_dist_attr_name, -1.0)
         setattr(self, last_target_attr_name, cur_target)
         return reward, target
 
@@ -1094,11 +1131,13 @@ class Preprocessor:
         self.last_flash_count = flash_count
 
         connected_boundary_clusters = reward_feats.get("connected_boundary_clusters", [])
+        last_action = reward_feats.get("last_action", -1)
         offview_guidance_reward_1, _ = self._compute_offview_guidance_reward(
             monster_feat=m1,
             connected_clusters=connected_boundary_clusters,
             last_dist_attr_name="last_offview_guidance_dist_1",
             last_target_attr_name="last_offview_guidance_target_1",
+            last_action=last_action,
             angle_cos_threshold=0.0,
         )
 
@@ -1109,6 +1148,7 @@ class Preprocessor:
                 connected_clusters=connected_boundary_clusters,
                 last_dist_attr_name="last_offview_guidance_dist_2",
                 last_target_attr_name="last_offview_guidance_target_2",
+                last_action=last_action,
                 angle_cos_threshold=0.0,
             )
         else:
