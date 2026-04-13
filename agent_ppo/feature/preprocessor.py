@@ -211,7 +211,7 @@ class Preprocessor:
                 self.visibility_map[gx, gy] = visible_val
                 self.passable_map[gx, gy] = passable_val
 
-        return gx0, gx1, gy0, gy1
+        return gx0, gx1, gy0, gy1, newly_discovered_passable_count
 
 
     def _is_global_passable(self, x, z):
@@ -229,6 +229,10 @@ class Preprocessor:
         """Find the farthest valid flash landing cell in the given direction.
 
         在给定方向上，从远到近寻找最远的合法闪现落点。
+        闪现允许穿墙，因此只检查落点本身：
+        - 不能出界
+        - 不能落在“已知墙”上
+        - 未知区域视为可尝试，由官方 legal_action 再做最终兜底
         返回: (offset_x, offset_z, ok)
         """
         hero_x = int(hero_x)
@@ -242,8 +246,11 @@ class Preprocessor:
         for step in range(max_dist, 0, -1):
             nx = hero_x + dx * step
             nz = hero_z + dz * step
-            if self._is_global_passable(nx, nz):
-                return dx * step, dz * step, True
+            if not (0 <= nx < MAP_SIZE_INT and 0 <= nz < MAP_SIZE_INT):
+                continue
+            if self._is_known_wall(nx, nz):
+                continue
+            return dx * step, dz * step, True
         return 0, 0, False
     
     def _is_known_wall(self, x, z):
@@ -253,6 +260,69 @@ class Preprocessor:
         if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
             return True  # 出界直接视为墙，更保守
         return bool(self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0)
+
+    def _parse_legal_action_raw(self, legal_act_raw):
+        """Parse env legal_action into a 16D binary mask."""
+        legal_action = [1] * 16
+        if isinstance(legal_act_raw, list) and legal_act_raw:
+            if isinstance(legal_act_raw[0], bool):
+                for j in range(min(16, len(legal_act_raw))):
+                    legal_action[j] = int(legal_act_raw[j])
+            else:
+                valid_set = {int(a) for a in legal_act_raw if 0 <= int(a) < 16}
+                legal_action = [1 if j in valid_set else 0 for j in range(16)]
+
+        if sum(legal_action) == 0:
+            legal_action = [1] * 16
+        return legal_action
+
+    def _build_processed_legal_action(self, hero_x, hero_z, legal_action_mask):
+        """Build a model-facing 16D legal-action feature and a hard 16D mask.
+
+        - 0~7: 移动。若下一格确定撞墙/出界，则直接置 0。
+        - 8~15: 闪现。允许穿墙，但落点不能是墙；分数按可闪出的距离线性归一化。
+        返回:
+            legal_action_feat: float32[16]，给模型作为输入
+            legal_action_mask: int[16]，给 PPO action masking 使用
+        """
+        hero_x = int(hero_x)
+        hero_z = int(hero_z)
+
+        processed_mask = [int(v) for v in legal_action_mask]
+        processed_feat = np.zeros(16, dtype=np.float32)
+
+        for i, (dx, dz) in enumerate(DIR8):
+            if processed_mask[i] <= 0:
+                continue
+
+            nx = hero_x + dx
+            nz = hero_z + dz
+            blocked = (not (0 <= nx < MAP_SIZE_INT and 0 <= nz < MAP_SIZE_INT)) or self._is_known_wall(nx, nz)
+            if blocked:
+                processed_mask[i] = 0
+                processed_feat[i] = 0.0
+            else:
+                processed_feat[i] = 1.0
+
+        for i, (dx, dz) in enumerate(DIR8, start=8):
+            if processed_mask[i] <= 0:
+                continue
+
+            off_x, off_z, ok = self._flash_landing_offset(hero_x, hero_z, dx, dz)
+            if not ok:
+                processed_mask[i] = 0
+                processed_feat[i] = 0.0
+                continue
+
+            dist = float(np.hypot(off_x, off_z))
+            max_dist = 8.0 if (dx != 0 and dz != 0) else 10.0
+            processed_feat[i] = float(np.clip(dist / max_dist, 0.0, 1.0))
+
+        if sum(processed_mask) == 0:
+            processed_mask = [1] * 16
+            processed_feat[:] = 1.0
+
+        return processed_feat, processed_mask
 
     def _is_unknown(self, x, z):
         """
@@ -779,18 +849,13 @@ class Preprocessor:
         #     title="ray_collision_debug",
         # )
 
-        # 合法动作掩码 (16D)，仅用于 action masking，不直接拼入 observation 向量
-        legal_action = [1] * 16
-        if isinstance(legal_act_raw, list) and legal_act_raw:
-            if isinstance(legal_act_raw[0], bool):
-                for j in range(min(16, len(legal_act_raw))):
-                    legal_action[j] = int(legal_act_raw[j])
-            else:
-                valid_set = {int(a) for a in legal_act_raw if int(a) < 16}
-                legal_action = [1 if j in valid_set else 0 for j in range(16)]
-
-        if sum(legal_action) == 0:
-            legal_action = [1] * 16
+        # 合法动作特征 + 合法动作掩码
+        raw_legal_action = self._parse_legal_action_raw(legal_act_raw)
+        legal_action_feat, legal_action = self._build_processed_legal_action(
+            hero_pos["x"],
+            hero_pos["z"],
+            raw_legal_action,
+        )
 
         # 进度特征
         step_norm = _norm(self.step_no, self.max_step)
@@ -819,6 +884,7 @@ class Preprocessor:
                 monster_feats[1],
                 ray_collision_feat,
                 boundary_cluster_feat,
+                legal_action_feat,
                 progress_feat,
             ]
         )

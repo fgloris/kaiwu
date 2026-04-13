@@ -19,6 +19,7 @@ class Config:
         7,   # monster2
         8,   # ray collision
         8,   # boundery cluster
+        16,  # legal action mask
         4,   # progress
     ]
     VECTOR_FEATURE_LEN = sum(VECTOR_FEATURES)
