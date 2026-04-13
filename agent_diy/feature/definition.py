@@ -1,52 +1,58 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
-###########################################################################
-# Copyright © 1998 - 2026 Tencent. All Rights Reserved.
-###########################################################################
-"""
-Author: Tencent AI Arena Authors
-"""
 
-
-from common_python.utils.common_func import create_cls
 import numpy as np
+from common_python.utils.common_func import create_cls
 from agent_diy.conf.conf import Config
 
-# The create_cls function is used to dynamically create a class. The first parameter of the function is the type name,
-# and the remaining parameters are the attributes of the class, which should have a default value of None.
-# create_cls函数用于动态创建一个类，函数第一个参数为类型名称，剩余参数为类的属性，属性默认值应设为None
 ObsData = create_cls(
     "ObsData",
-    feature=None,
-    legal_act=None,
+    vector_feature=None,
+    map_feature=None,
+    legal_action=None,
 )
-
 
 ActData = create_cls(
     "ActData",
-    act=None,
+    action=None,
+    d_action=None,
+    prob=None,
+    value=None,
 )
 
-
-# SampleData用于在aisrv和learner之间传递训练样本
-# 必须使用整数定义维度（不能用None），框架层会自动生成FIELD_DIMS并处理序列化
 SampleData = create_cls(
     "SampleData",
-    obs=153,  # 观测维度，对应Config.FEATURE_VECTOR_SHAPE[0]
-    legal_actions=8,  # 合法动作维度
-    actions=1,  # 动作维度（标量）
-    probs=8,  # 动作概率分布维度
-    rewards=1,  # 奖励（标量）
-    advantages=1,  # 优势函数（标量）
-    values=1,  # 价值函数（标量）
-    dones=1,  # 是否结束（标量）
-    # 根据你的实际算法需求添加其他字段
+    vector_obs=Config.VECTOR_FEATURE_LEN,
+    map_obs=Config.MAP_CHANNEL * Config.MAP_SIZE * Config.MAP_SIZE,
+    legal_action=Config.ACTION_DIM,
+    act=1,
+    reward=1,
+    reward_sum=1,
+    done=1,
+    value=1,
+    next_value=1,
+    advantage=1,
+    prob=Config.ACTION_DIM,
 )
 
 
 def reward_shaping(frame_no, score, terminated, truncated, remain_info, _remain_info, obs, _obs):
-    pass
+    return score
 
 
-def sample_process(list_game_data):
-    pass
+def sample_process(list_sample_data):
+    for i in range(len(list_sample_data) - 1):
+        list_sample_data[i].next_value = list_sample_data[i + 1].value
+    _calc_gae(list_sample_data)
+    return list_sample_data
+
+
+def _calc_gae(list_sample_data):
+    gae = 0.0
+    gamma = getattr(Config, 'GAMMA', 0.95)
+    lamda = getattr(Config, 'LAMDA', 0.95)
+    for sample in reversed(list_sample_data):
+        delta = -sample.value + sample.reward + gamma * sample.next_value
+        gae = gae * gamma * lamda + delta
+        sample.advantage = gae
+        sample.reward_sum = gae + sample.value
