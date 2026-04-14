@@ -167,8 +167,8 @@ class Preprocessor:
         self.last_flash_count = 0
         self.last_is_dangerous = False
 
-        self.prev_hero_pos = None
-        self.prev_prev_hero_pos = None
+        self.pos_history = deque(maxlen=8)
+        self.abb_safe_score = 4.0
 
         self.last_treasure_dist_norm = -1.0
         self.last_buff_dist_norm = -1.0
@@ -968,38 +968,55 @@ class Preprocessor:
         cur_x = int(hero_pos["x"])
         cur_z = int(hero_pos["z"])
 
-        if self.prev_hero_pos is None:
-            prev_x, prev_z = cur_x, cur_z
-        else:
-            prev_x, prev_z = self.prev_hero_pos
+        history = list(self.pos_history)
 
-        if self.prev_prev_hero_pos is None:
-            prev_prev_x, prev_prev_z = prev_x, prev_z
+        if len(history) >= 4:
+            p4_x, p4_z = history[-4]
+        elif len(history) > 0:
+            p4_x, p4_z = history[0]
         else:
-            prev_prev_x, prev_prev_z = self.prev_prev_hero_pos
+            p4_x, p4_z = cur_x, cur_z
+
+        if len(history) >= 8:
+            p8_x, p8_z = history[-8]
+        elif len(history) > 0:
+            p8_x, p8_z = history[0]
+        else:
+            p8_x, p8_z = cur_x, cur_z
 
         return np.array([
-            _norm(prev_x, MAP_SIZE),
-            _norm(prev_z, MAP_SIZE),
-            _norm(prev_prev_x, MAP_SIZE),
-            _norm(prev_prev_z, MAP_SIZE),
+            _norm(p4_x, MAP_SIZE),
+            _norm(p4_z, MAP_SIZE),
+            _norm(p8_x, MAP_SIZE),
+            _norm(p8_z, MAP_SIZE),
         ], dtype=np.float32)
 
-    def _compute_abb_penalty(self, cur_hero_pos, prev_hero_pos, prev_prev_hero_pos):
-        """A-B-A 两点往返惩罚。"""
-        if cur_hero_pos is None or prev_hero_pos is None or prev_prev_hero_pos is None:
+    def _compute_abb_score(self, cur_hero_pos):
+        """
+        abb_score = d(p0,p-1)/1 + d(p0,p-2)/2 + ... + d(p0,p-8)/8
+        分数越小，说明越可能在局部反复徘徊。
+        """
+        if cur_hero_pos is None or len(self.pos_history) == 0:
             return 0.0
 
-        cur_x, cur_z = int(cur_hero_pos[0]), int(cur_hero_pos[1])
-        prev_x, prev_z = int(prev_hero_pos[0]), int(prev_hero_pos[1])
-        prev_prev_x, prev_prev_z = int(prev_prev_hero_pos[0]), int(prev_prev_hero_pos[1])
+        cur_x = float(cur_hero_pos[0])
+        cur_z = float(cur_hero_pos[1])
 
-        is_backtrack = (cur_x == prev_prev_x and cur_z == prev_prev_z)
-        did_move = (cur_x != prev_x or cur_z != prev_z)
+        abb_score = 0.0
+        history = list(self.pos_history)
+        max_steps = min(8, len(history))
 
-        if is_backtrack and did_move:
-            return -1.0
-        return 0.0
+        for step in range(1, max_steps + 1):
+            px, pz = history[-step]
+            dist = float(np.hypot(cur_x - float(px), cur_z - float(pz)))
+            abb_score += dist / float(step)
+
+        return abb_score
+
+    def _compute_abb_penalty(self, cur_hero_pos):
+        abb_score = self._compute_abb_score(cur_hero_pos)
+        penalty = -max(0.0, 1.0 - abb_score / max(self.abb_safe_score, 1e-6))
+        return abb_score, penalty
 
 
     def feature_process(self, env_obs, last_action):
@@ -1224,8 +1241,6 @@ class Preprocessor:
             "monster_feats_available": len(monsters),
             "progress_feats": progress_feat,
             "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
-            "prev_hero_pos": self.prev_hero_pos,
-            "prev_prev_hero_pos": self.prev_prev_hero_pos,
             "last_action": int(last_action),
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
             "connected_boundary_clusters": boundary_cluster_info["connected_clusters"],
@@ -1235,8 +1250,7 @@ class Preprocessor:
             "nearest_buff_dist_norm": float(nearest_buff_dist_norm),
         }
 
-        self.prev_prev_hero_pos = self.prev_hero_pos
-        self.prev_hero_pos = (int(hero_pos["x"]), int(hero_pos["z"]))
+        self.pos_history.append((int(hero_pos["x"]), int(hero_pos["z"])))
 
         return vector_feat, map_feat, reward_feats, legal_action
     
@@ -1338,11 +1352,7 @@ class Preprocessor:
                 search_radius=3,
             )
 
-        abb_penalty = self._compute_abb_penalty(
-            cur_hero_pos=cur_hero_pos,
-            prev_hero_pos=reward_feats.get("prev_hero_pos"),
-            prev_prev_hero_pos=reward_feats.get("prev_prev_hero_pos"),
-        )
+        abb_score, abb_penalty = self._compute_abb_penalty(cur_hero_pos)
 
         # 探索奖励
         newly_discovered_passable_count = reward_feats.get("newly_discovered_passable_count", 0)
@@ -1350,7 +1360,12 @@ class Preprocessor:
             explore_reward = 0.0
         else: explore_reward = _norm(newly_discovered_passable_count, 40.0)
 
+        # 生存奖励
         survive_phase_weight = 1.00 + (self.step_no / 200)
+        survive_reward = 1.00
+        if abb_score < self.abb_safe_score:
+            survive_reward = 0.0
+            los_break_reward = min(los_break_reward, 0.0)
 
         treasure_dist_reward = self._compute_positive_dist_shaping(
             reward_feats.get("nearest_treasure_dist_norm", -1.0),
@@ -1374,7 +1389,7 @@ class Preprocessor:
 
         reward_vector = [
             0.50 * score_gain,
-            0.03 * survive_phase_weight,
+            0.03 * survive_phase_weight * survive_reward,
             3.50 * dist_shaping_norm_weight * monster_dist_reward,
             0.50 * los_break_reward,
             0.25 * flash_reward,
