@@ -1415,14 +1415,14 @@ class Preprocessor:
         exploration_rate *= (10.0 if (not cur_is_dangerous) else 0.1)
 
         reward_vector = [
-            0.20 * score_gain,
+            score_gain,
             0.02 * survive_phase_weight,
-            3.50 * dist_shaping_norm_weight * monster_dist_reward,
-            0.50 * los_break_reward,
-            0.25 * flash_reward,
-            0.20 * near_wall_penalty,
-            0.10 * exploration_rate * explore_reward,
-            0.30 * danger_penalty,
+            0.1 * 3.50 * dist_shaping_norm_weight * monster_dist_reward,
+            0.1 * 0.50 * los_break_reward,
+            0.1 * 0.25 * flash_reward,
+            0.1 * 0.20 * near_wall_penalty,
+            0.1 * 0.10 * exploration_rate * explore_reward,
+            0.1 * 0.30 * danger_penalty,
             0.30 * exploration_rate * dist_shaping_norm_weight * treasure_dist_reward,
             0.30 * exploration_rate * dist_shaping_norm_weight * buff_dist_reward,
         ]
