@@ -1394,19 +1394,25 @@ class Preprocessor:
 
         survive_phase_weight = 1.00 + (self.step_no / 200)
 
-        obj_reward_scale = 1.5 if (not cur_is_dangerous) else 0.5
-
-        treasure_dist_reward = obj_reward_scale * self._compute_positive_dist_shaping(
+        treasure_dist_reward = self._compute_positive_dist_shaping(
             reward_feats.get("nearest_treasure_dist_norm", -1.0),
             "last_treasure_dist_norm",
         )
-        buff_dist_reward = obj_reward_scale * 0.4 * self._compute_positive_dist_shaping(
+        buff_dist_reward = 0.4 * self._compute_positive_dist_shaping(
             reward_feats.get("nearest_buff_dist_norm", -1.0),
             "last_buff_dist_norm",
         )
 
         # final step reward vector
         dist_shaping_norm_weight = 12.8
+
+        exploration_rate = 1.0
+        if cur_invisible_1 and cur_invisible_2:
+            exploration_rate = 10.0
+        else:
+            exploration_rate = 0.1
+
+        exploration_rate *= (10.0 if (not cur_is_dangerous) else 0.1)
 
         reward_vector = [
             0.20 * score_gain,
@@ -1415,10 +1421,10 @@ class Preprocessor:
             0.50 * los_break_reward,
             0.25 * flash_reward,
             0.20 * near_wall_penalty,
-            0.08 * explore_reward,
+            0.10 * exploration_rate * explore_reward,
             0.30 * danger_penalty,
-            0.30 * dist_shaping_norm_weight * treasure_dist_reward,
-            0.30 * dist_shaping_norm_weight * buff_dist_reward,
+            0.30 * exploration_rate * dist_shaping_norm_weight * treasure_dist_reward,
+            0.30 * exploration_rate * dist_shaping_norm_weight * buff_dist_reward,
         ]
 
         return reward_vector, sum(reward_vector)
