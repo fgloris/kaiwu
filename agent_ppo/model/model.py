@@ -56,7 +56,7 @@ class Model(nn.Module):
         )
 
         self.map_stem = nn.Sequential(
-            nn.Conv2d(2, 32, 3, padding=1),
+            nn.Conv2d(Config.MAP_CHANNEL, 32, 3, padding=1),
             nn.ReLU(),
             nn.Dropout2d(self.map_dropout_p),
         )

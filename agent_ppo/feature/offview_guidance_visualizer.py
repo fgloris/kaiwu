@@ -66,6 +66,23 @@ def extract_local_patch(binary_map: np.ndarray, cx: int, cy: int, local_size: in
     return patch
 
 
+def mask_monster_danger_zone_local(local_passable: np.ndarray, monster_local, radius: int = 3) -> np.ndarray:
+    masked = np.array(local_passable, copy=True)
+    if monster_local is None:
+        return masked
+
+    mx, my = monster_local
+    if not (0 <= mx < LOCAL_SIZE and 0 <= my < LOCAL_SIZE):
+        return masked
+
+    x0 = max(0, mx - radius)
+    x1 = min(LOCAL_SIZE, mx + radius + 1)
+    y0 = max(0, my - radius)
+    y1 = min(LOCAL_SIZE, my + radius + 1)
+    masked[y0:y1, x0:x1] = 0
+    return masked
+
+
 def get_boundary_passable_points(local_passable: np.ndarray):
     pts = []
     h, w = local_passable.shape
@@ -201,10 +218,12 @@ def action_to_dir_vec(action_idx):
     return float(dx / norm), float(dz / norm)
 
 
-def compute_offview_guidance_info(local_passable, monster_vec, last_action: int, angle_cos_threshold=0.0):
-    boundary_pts = get_boundary_passable_points(local_passable)
+def compute_offview_guidance_info(local_passable, monster_vec, monster_local, last_action: int, angle_cos_threshold=0.0):
+    masked_local_passable = mask_monster_danger_zone_local(local_passable, monster_local, radius=3)
+
+    boundary_pts = get_boundary_passable_points(masked_local_passable)
     clusters = cluster_boundary_points(boundary_pts)
-    connected_mask = compute_local_connected_mask(local_passable)
+    connected_mask = compute_local_connected_mask(masked_local_passable)
 
     all_clusters = []
     connected_clusters_only = []
@@ -249,14 +268,18 @@ def compute_offview_guidance_info(local_passable, monster_vec, last_action: int,
             reward = max(0.0, cos_sim)
 
     return {
+        "masked_local_passable": masked_local_passable,
         "boundary_pts": boundary_pts,
         "clusters": all_clusters,
         "connected_mask": connected_mask,
+        "connected_opening_count": len(connected_clusters_only),
+        "is_dangerous": len(connected_clusters_only) <= 1,
         "target": target,
         "action_vec": action_vec,
         "cos_sim": cos_sim,
         "reward": reward,
     }
+
 
 
 class OffviewGuidanceVisualizer:
@@ -277,6 +300,8 @@ class OffviewGuidanceVisualizer:
         self.monster_scatter = self.ax.scatter([], [], s=100, marker="X")
         self.local_rect = plt.Rectangle((0, 0), LOCAL_SIZE, LOCAL_SIZE, fill=False, linewidth=1.5)
         self.ax.add_patch(self.local_rect)
+        self.monster_danger_rect = plt.Rectangle((0, 0), 7, 7, fill=True, alpha=0.25)
+        self.ax.add_patch(self.monster_danger_rect)
 
         self.boundary_scatter = self.ax.scatter([], [], s=35, marker="s")
         self.cluster_center_scatter = self.ax.scatter([], [], s=90, marker="x")
@@ -340,6 +365,9 @@ class OffviewGuidanceVisualizer:
         self.local_rect.set_xy((-100, -100))
         self.local_rect.set_width(LOCAL_SIZE)
         self.local_rect.set_height(LOCAL_SIZE)
+        self.monster_danger_rect.set_xy((-100, -100))
+        self.monster_danger_rect.set_width(7)
+        self.monster_danger_rect.set_height(7)
         self.info_text.set_text("Move mouse onto a white/passable pixel | Right click to set monster")
         self._remove_arrows_and_texts()
 
@@ -416,6 +444,11 @@ class OffviewGuidanceVisualizer:
         self.monster_scatter.set_offsets(np.array([self.monster_world], dtype=np.float64) if self.monster_world is not None else np.empty((0, 2)))
         self.local_rect.set_xy((x - LOCAL_HALF - 0.5, y - LOCAL_HALF - 0.5))
         self._remove_arrows_and_texts()
+        if self.monster_world is not None:
+            mx, my = self.monster_world
+            self.monster_danger_rect.set_xy((mx - 3 - 0.5, my - 3 - 0.5))
+        else:
+            self.monster_danger_rect.set_xy((-100, -100))
 
         if monster_vec is None or (abs(monster_vec[0]) < 1e-6 and abs(monster_vec[1]) < 1e-6):
             self.boundary_scatter.set_offsets(np.empty((0, 2)))
@@ -434,6 +467,7 @@ class OffviewGuidanceVisualizer:
         info = compute_offview_guidance_info(
             patch,
             monster_vec=monster_vec,
+            monster_local=self.monster_local,
             last_action=self.last_action,
             angle_cos_threshold=self.angle_cos_threshold,
         )
@@ -498,6 +532,8 @@ class OffviewGuidanceVisualizer:
             f"boundary_pts={len(info['boundary_pts'])}",
             f"clusters={len(info['clusters'])}",
             f"connected_clusters={sum(1 for c in info['clusters'] if c['connected'])}",
+            f"connected_opening_count={info['connected_opening_count']}",
+            f"dangerous={info['is_dangerous']}",
         ]
         if target is not None:
             lines.append(f"target_center=({target['center'][0]:.2f}, {target['center'][1]:.2f})")

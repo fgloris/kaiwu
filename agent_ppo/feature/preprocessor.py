@@ -173,6 +173,15 @@ class Preprocessor:
 
         self.prev_hero_pos = None
 
+        self.last_treasure_dist_norm = -1.0
+        self.last_buff_dist_norm = -1.0
+
+        # 全局物件记忆
+        self.treasure_memory = {}
+        self.buff_memory = {}
+        self.last_collected_buff = 0
+        self.buff_refresh_time = 200
+
         # ========= 两层全局记忆 =========
         # 第一层：可通行地图：1=可走, 0=不能走/未知
         self.passable_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
@@ -562,6 +571,35 @@ class Preprocessor:
                 local_passable[i, j] = 1 if int(map_info[i][j]) != 0 else 0
         return local_passable
 
+    def _mask_monster_danger_zone_local(self, local_passable, monsters, hero_pos, radius=3):
+        """
+        在局部 21x21 邻域内，如果怪物在视野内，
+        则将其周围 7x7 区域置 0，再用于 boundary cluster 计算。
+        """
+        masked = np.array(local_passable, copy=True)
+        hero_x = int(hero_pos["x"])
+        hero_z = int(hero_pos["z"])
+
+        for monster in monsters[:2]:
+            if int(monster.get("is_in_view", 0)) <= 0:
+                continue
+            pos = monster.get("pos", {}) or {}
+            mx = int(pos.get("x", hero_x))
+            mz = int(pos.get("z", hero_z))
+
+            lx = mx - hero_x + LOCAL_MAP_HALF
+            ly = mz - hero_z + LOCAL_MAP_HALF
+            if not (0 <= lx < LOCAL_MAP_SIZE and 0 <= ly < LOCAL_MAP_SIZE):
+                continue
+
+            x0 = max(0, lx - radius)
+            x1 = min(LOCAL_MAP_SIZE, lx + radius + 1)
+            y0 = max(0, ly - radius)
+            y1 = min(LOCAL_MAP_SIZE, ly + radius + 1)
+            masked[y0:y1, x0:x1] = 0
+
+        return masked
+
     def _get_boundary_passable_points(self, local_passable):
         """
         提取 21x21 局部图边框上的所有可通行点。
@@ -663,6 +701,7 @@ class Preprocessor:
         2. 对边框点做 8 邻接聚类
         3. 仅保留与 agent 中心连通的簇
         4. 将连通簇中心对 8 个动作方向做余弦相似度投影，得到 8 维方向分数
+        5. 若连通的边界开口簇数量 <= 1，则记为危险局势
         """
         boundary_pts = self._get_boundary_passable_points(local_passable)
         clusters = self._cluster_boundary_points(boundary_pts)
@@ -717,10 +756,26 @@ class Preprocessor:
             dir_scores /= total_connected_weight
 
         dir_scores = np.clip(dir_scores, 0.0, 1.0).astype(np.float32)
+        is_dangerous = len(connected_clusters) <= 1
         return dir_scores, {
             "boundary_pts": boundary_pts,
             "clusters": clusters,
             "connected_clusters": connected_clusters,
+            "connected_opening_count": len(connected_clusters),
+            "is_dangerous": is_dangerous,
+            "masked_local_passable": np.array(local_passable, copy=True),
+        }
+
+    def _judge_situation(self, local_passable):
+        """
+        根据 boundary cluster 判断局势。
+        当前规则：连通的边界开口簇数量 <= 1 记为危险。
+        """
+        _, debug = self._compute_boundary_cluster_direction_scores(local_passable)
+        return {
+            "is_dangerous": bool(debug["is_dangerous"]),
+            "connected_opening_count": int(debug["connected_opening_count"]),
+            "connected_clusters": debug["connected_clusters"],
         }
 
     def _select_reachable_opposite_boundary_cluster(self, connected_clusters, monster_feat, angle_cos_threshold=0.0):
@@ -868,6 +923,124 @@ class Preprocessor:
         return reward, target
 
 
+    def _update_organ_memory(self, env_info, organs, hero_pos):
+        self.buff_refresh_time = int(env_info.get("buff_refresh_time", self.buff_refresh_time))
+        remaining_treasures = {int(x) for x in env_info.get("treasure_id", [])}
+
+        for organ in organs:
+            config_id = int(organ.get("config_id", -1))
+            if config_id < 0:
+                continue
+            sub_type = int(organ.get("sub_type", 0))
+            pos = organ.get("pos", {}) or {}
+            x = int(pos.get("x", 0))
+            z = int(pos.get("z", 0))
+            status = int(organ.get("status", 0))
+
+            if sub_type == 1:
+                mem = self.treasure_memory.setdefault(config_id, {"pos": (x, z), "available": False})
+                mem["pos"] = (x, z)
+                mem["available"] = config_id in remaining_treasures
+            elif sub_type == 2:
+                mem = self.buff_memory.setdefault(
+                    config_id,
+                    {"pos": (x, z), "available": False, "respawn_step": -1},
+                )
+                mem["pos"] = (x, z)
+                if status == 1:
+                    mem["available"] = True
+                    mem["respawn_step"] = -1
+                else:
+                    mem["available"] = False
+                    if mem.get("respawn_step", -1) < 0:
+                        mem["respawn_step"] = self.step_no + self.buff_refresh_time
+
+        for config_id, mem in self.treasure_memory.items():
+            mem["available"] = config_id in remaining_treasures
+
+        collected_buff = int(env_info.get("collected_buff", self.last_collected_buff))
+        buff_delta = max(0, collected_buff - self.last_collected_buff)
+        if buff_delta > 0 and self.buff_memory:
+            hero_x = int(hero_pos["x"])
+            hero_z = int(hero_pos["z"])
+            candidates = []
+            for bid, mem in self.buff_memory.items():
+                if not mem.get("available", False):
+                    continue
+                bx, bz = mem["pos"]
+                dist = float(np.hypot(bx - hero_x, bz - hero_z))
+                candidates.append((dist, bid))
+            candidates.sort()
+            for _, bid in candidates[:buff_delta]:
+                self.buff_memory[bid]["available"] = False
+                self.buff_memory[bid]["respawn_step"] = self.step_no + self.buff_refresh_time
+
+        self.last_collected_buff = collected_buff
+
+        for mem in self.buff_memory.values():
+            respawn_step = int(mem.get("respawn_step", -1))
+            if respawn_step >= 0 and self.step_no >= respawn_step:
+                mem["available"] = True
+                mem["respawn_step"] = -1
+
+    def _build_target_features(self, hero_pos, memory, topk=2, prefer_available_only=False):
+        hero_x = int(hero_pos["x"])
+        hero_z = int(hero_pos["z"])
+        items = []
+        for obj_id, mem in memory.items():
+            available = bool(mem.get("available", False))
+            if prefer_available_only and not available:
+                continue
+            x, z = mem["pos"]
+            dx = float(x - hero_x)
+            dz = float(z - hero_z)
+            dist = float(np.hypot(dx, dz))
+            dir_x = dx / dist if dist > 1e-6 else 0.0
+            dir_z = dz / dist if dist > 1e-6 else 0.0
+            items.append({
+                "id": int(obj_id),
+                "pos": (int(x), int(z)),
+                "available": available,
+                "dist": dist,
+                "dist_norm": _norm(dist, MAP_SIZE * 1.41),
+                "feat": np.array([
+                    float(np.clip(dx / MAP_SIZE, -1.0, 1.0)),
+                    float(np.clip(dz / MAP_SIZE, -1.0, 1.0)),
+                    float(dir_x),
+                    float(dir_z),
+                    _norm(dist, MAP_SIZE * 1.41),
+                    1.0 if available else 0.0,
+                ], dtype=np.float32),
+            })
+
+        items.sort(key=lambda x: (0 if x["available"] else 1, x["dist"]))
+
+        feat_list = []
+        for item in items[:topk]:
+            feat_list.append(item["feat"])
+        while len(feat_list) < topk:
+            feat_list.append(np.zeros(6, dtype=np.float32))
+
+        best_dist_norm = -1.0
+        for item in items:
+            if item["available"]:
+                best_dist_norm = float(item["dist_norm"])
+                break
+
+        return np.concatenate(feat_list, axis=0), items, best_dist_norm
+
+    def _compute_positive_dist_shaping(self, cur_dist_norm, last_attr_name):
+        if cur_dist_norm < 0:
+            setattr(self, last_attr_name, -1.0)
+            return 0.0
+        last_dist_norm = float(getattr(self, last_attr_name, -1.0))
+        reward = 0.0
+        if last_dist_norm >= 0.0:
+            reward = max(0.0, last_dist_norm - cur_dist_norm)
+        setattr(self, last_attr_name, float(cur_dist_norm))
+        return reward
+
+
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
 
@@ -882,6 +1055,7 @@ class Preprocessor:
 
         self.step_no = observation["step_no"]
         self.max_step = env_info.get("max_step", 200)
+        newly_discovered_passable_count = 0
 
         # Hero self features (4D) / 英雄自身特征
         hero = frame_state["heroes"]
@@ -946,10 +1120,19 @@ class Preprocessor:
             else:
                 monster_feats.append(np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32))
 
+        organs = frame_state.get("organs", [])
+        self._update_organ_memory(env_info, organs, hero_pos)
+        treasure_feat, treasure_items, nearest_treasure_dist_norm = self._build_target_features(
+            hero_pos, self.treasure_memory, topk=2, prefer_available_only=True
+        )
+        buff_feat, buff_items, nearest_buff_dist_norm = self._build_target_features(
+            hero_pos, self.buff_memory, topk=2, prefer_available_only=False
+        )
+
         if map_info is not None:
             x0, x1, y0, y1, newly_discovered_passable_count = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
 
-        map_feat = np.zeros((2, VIEW_MAP_SIZE, VIEW_MAP_SIZE), dtype=np.float32)
+        map_feat = np.zeros((3, VIEW_MAP_SIZE, VIEW_MAP_SIZE), dtype=np.float32)
 
         crop_size = VIEW_MAP_SIZE
         half = crop_size // 2  # 18
@@ -982,6 +1165,27 @@ class Preprocessor:
             center_i = mx - gx0
             center_j = mz - gy0
             _paint_square(map_feat[1], center_i, center_j, radius=1, value=1.0)
+
+        # 第三层：当前视野内的 treasure / buff mask
+        for organ in organs:
+            if int(organ.get("status", 0)) != 1:
+                continue
+            pos = organ.get("pos", {}) or {}
+            ox = int(pos.get("x", -1))
+            oz = int(pos.get("z", -1))
+            if not (0 <= ox < MAP_SIZE_INT and 0 <= oz < MAP_SIZE_INT):
+                continue
+            if self.visibility_map[ox, oz] == 0:
+                continue
+
+            center_i = ox - gx0
+            center_j = oz - gy0
+            sub_type = int(organ.get("sub_type", 0))
+            if sub_type == 1:
+                _paint_square(map_feat[2], center_i, center_j, radius=1, value=1.0)
+            elif sub_type == 2:
+                value = max(float(map_feat[2, center_i, center_j]) if 0 <= center_i < VIEW_MAP_SIZE and 0 <= center_j < VIEW_MAP_SIZE else 0.0, 0.4)
+                _paint_square(map_feat[2], center_i, center_j, radius=1, value=value)
 
         ray_collision_feat = self._ray_collision_direction_scores(
             hero_pos["x"],
@@ -1018,11 +1222,19 @@ class Preprocessor:
         time_before_mounster_speedup = _norm(max(0, monster_speedup_time - self.step_no), self.max_step)
         progress_feat = np.array([step_norm, progress_treasure_collect, time_before_second_mounster, time_before_mounster_speedup], dtype=np.float32)
 
-        # 基于当前 21x21 绝对已知区域，提取边缘连通簇的 8 方向余弦投影特征
+        # 基于当前 21x21 绝对已知区域，先将视野内怪物周围 7x7 置 0，
+        # 再提取边缘连通簇的 8 方向余弦投影特征
         local_passable_21 = self._extract_local_passable_patch(map_info)
-        boundary_cluster_feat, _boundary_cluster_debug = self._compute_boundary_cluster_direction_scores(
-            local_passable_21
+        local_passable_21_masked = self._mask_monster_danger_zone_local(
+            local_passable_21,
+            monsters,
+            hero_pos,
+            radius=3,
         )
+        boundary_cluster_feat, _boundary_cluster_debug = self._compute_boundary_cluster_direction_scores(
+            local_passable_21_masked
+        )
+        situation_info = self._judge_situation(local_passable_21_masked)
 
         # Concatenate features / 拼接特征
         # 新增一组 8 维边缘连通簇方向特征，放在 ray collision 特征之后
@@ -1033,6 +1245,8 @@ class Preprocessor:
                 monster_feats[1],
                 ray_collision_feat,
                 boundary_cluster_feat,
+                treasure_feat,
+                buff_feat,
                 legal_action_feat,
                 progress_feat,
             ]
@@ -1047,6 +1261,10 @@ class Preprocessor:
             "last_action": int(last_action),
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
             "connected_boundary_clusters": _boundary_cluster_debug["connected_clusters"],
+            "connected_opening_count": int(situation_info["connected_opening_count"]),
+            "is_dangerous": bool(situation_info["is_dangerous"]),
+            "nearest_treasure_dist_norm": float(nearest_treasure_dist_norm),
+            "nearest_buff_dist_norm": float(nearest_buff_dist_norm),
         }
 
         self.prev_hero_pos = (int(hero_pos["x"]), int(hero_pos["z"]))
@@ -1174,6 +1392,15 @@ class Preprocessor:
 
         survive_phase_weight = 1.00 + (self.step_no / 200)
 
+        treasure_dist_reward = self._compute_positive_dist_shaping(
+            reward_feats.get("nearest_treasure_dist_norm", -1.0),
+            "last_treasure_dist_norm",
+        )
+        buff_dist_reward = 0.4 * self._compute_positive_dist_shaping(
+            reward_feats.get("nearest_buff_dist_norm", -1.0),
+            "last_buff_dist_norm",
+        )
+
         # final step reward vector
         dist_shaping_norm_weight = 12.8
 
@@ -1185,7 +1412,9 @@ class Preprocessor:
             0.0, # 0.25 * flash_reward,
             0.0, # 0.25 * offview_guidance_reward,
             0.20 * near_wall_penalty,
-            0.08 * explore_reward
+            0.08 * explore_reward,
+            0.30 * dist_shaping_norm_weight * treasure_dist_reward,
+            0.30 * dist_shaping_norm_weight * buff_dist_reward,
         ]
 
         return reward_vector, sum(reward_vector)
