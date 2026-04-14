@@ -19,11 +19,8 @@ class Config:
         7,   # monster2
         8,   # ray collision
         8,   # boundery cluster
-        12,  # nearest 2 treasures
-        12,  # 2 buffs
         16,  # legal action mask
         4,   # progress
-        2,   # situation
     ]
     VECTOR_FEATURE_LEN = sum(VECTOR_FEATURES)
 
@@ -40,7 +37,7 @@ class Config:
 
     GAMMA = 0.99
     LAMDA = 0.95
-    INIT_LEARNING_RATE_START = 0.0005
+    INIT_LEARNING_RATE_START = 0.0003
     BETA_START = 0.001
     CLIP_PARAM = 0.2
     VF_COEF = 1.0
