@@ -1366,15 +1366,15 @@ class Preprocessor:
 
         exploration_rate = 1.0
         if cur_invisible_1 and cur_invisible_2:
-            exploration_rate = 10.0
+            exploration_rate = 2.0
         else:
             exploration_rate = 0.1
 
-        exploration_rate *= (10.0 if (not cur_is_dangerous) else 0.1)
+        exploration_rate *= (2.0 if (not cur_is_dangerous) else 0.1)
 
         reward_vector = [
-            0.30 * score_gain,
-            0.02 * survive_phase_weight,
+            0.50 * score_gain,
+            0.03 * survive_phase_weight,
             3.50 * dist_shaping_norm_weight * monster_dist_reward,
             0.50 * los_break_reward,
             0.25 * flash_reward,
