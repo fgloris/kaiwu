@@ -163,6 +163,7 @@ class EpisodeRunner:
                 "r_monster_los_break_sum",
                 "r_flash_sum",
                 "r_wall_penalty_sum",
+                "r_abb_penalty_sum",
                 "r_exploration_sum",
                 "r_danger_penalty_sum",
                 "r_treasure_dist_sum",

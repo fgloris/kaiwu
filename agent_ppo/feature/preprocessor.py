@@ -1191,7 +1191,7 @@ class Preprocessor:
             local_passable_21,
             monsters,
             hero_pos,
-            radius=5,
+            radius=3,
         )
         boundary_cluster_feat, boundary_cluster_info = self._compute_boundary_cluster_direction_scores(
             local_passable_21_masked

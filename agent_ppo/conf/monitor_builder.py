@@ -136,6 +136,7 @@ def build_monitor():
         .add_metric(metrics_name="r_monster_los_break_sum", expr="avg(r_monster_los_break_sum{})")
         .add_metric(metrics_name="r_flash_sum", expr="avg(r_flash_sum{})")
         .add_metric(metrics_name="r_wall_penalty_sum", expr="avg(r_wall_penalty_sum{})")
+        .add_metric(metrics_name="r_abb_penalty_sum", expr="avg(r_abb_penalty_sum{})")
         .add_metric(metrics_name="r_exploration_sum", expr="avg(r_exploration_sum{})")
         .add_metric(metrics_name="r_danger_penalty_sum", expr="avg(r_danger_penalty_sum{})")
         .add_metric(metrics_name="r_treasure_dist_sum", expr="avg(r_treasure_dist_sum{})")
