@@ -168,6 +168,7 @@ class Preprocessor:
         self.last_is_dangerous = False
 
         self.prev_hero_pos = None
+        self.prev_prev_hero_pos = None
 
         self.last_treasure_dist_norm = -1.0
         self.last_buff_dist_norm = -1.0
@@ -963,6 +964,43 @@ class Preprocessor:
         setattr(self, last_attr_name, float(cur_dist_norm))
         return reward
 
+    def _build_history_position_feat(self, hero_pos):
+        cur_x = int(hero_pos["x"])
+        cur_z = int(hero_pos["z"])
+
+        if self.prev_hero_pos is None:
+            prev_x, prev_z = cur_x, cur_z
+        else:
+            prev_x, prev_z = self.prev_hero_pos
+
+        if self.prev_prev_hero_pos is None:
+            prev_prev_x, prev_prev_z = prev_x, prev_z
+        else:
+            prev_prev_x, prev_prev_z = self.prev_prev_hero_pos
+
+        return np.array([
+            _norm(prev_x, MAP_SIZE),
+            _norm(prev_z, MAP_SIZE),
+            _norm(prev_prev_x, MAP_SIZE),
+            _norm(prev_prev_z, MAP_SIZE),
+        ], dtype=np.float32)
+
+    def _compute_abb_penalty(self, cur_hero_pos, prev_hero_pos, prev_prev_hero_pos):
+        """A-B-A 两点往返惩罚。"""
+        if cur_hero_pos is None or prev_hero_pos is None or prev_prev_hero_pos is None:
+            return 0.0
+
+        cur_x, cur_z = int(cur_hero_pos[0]), int(cur_hero_pos[1])
+        prev_x, prev_z = int(prev_hero_pos[0]), int(prev_hero_pos[1])
+        prev_prev_x, prev_prev_z = int(prev_prev_hero_pos[0]), int(prev_prev_hero_pos[1])
+
+        is_backtrack = (cur_x == prev_prev_x and cur_z == prev_prev_z)
+        did_move = (cur_x != prev_x or cur_z != prev_z)
+
+        if is_backtrack and did_move:
+            return -1.0
+        return 0.0
+
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -989,6 +1027,7 @@ class Preprocessor:
         buff_remain_norm = _norm(hero["buff_remaining_time"], MAX_BUFF_DURATION)
 
         hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
+        history_pos_feat = self._build_history_position_feat(hero_pos)
 
         # 怪物特征
         monsters = frame_state.get("monsters", [])
@@ -1167,6 +1206,7 @@ class Preprocessor:
         vector_feat = np.concatenate(
             [
                 hero_feat,
+                history_pos_feat,
                 monster_feats[0],
                 monster_feats[1],
                 ray_collision_feat,
@@ -1185,6 +1225,7 @@ class Preprocessor:
             "progress_feats": progress_feat,
             "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
             "prev_hero_pos": self.prev_hero_pos,
+            "prev_prev_hero_pos": self.prev_prev_hero_pos,
             "last_action": int(last_action),
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
             "connected_boundary_clusters": boundary_cluster_info["connected_clusters"],
@@ -1194,6 +1235,7 @@ class Preprocessor:
             "nearest_buff_dist_norm": float(nearest_buff_dist_norm),
         }
 
+        self.prev_prev_hero_pos = self.prev_hero_pos
         self.prev_hero_pos = (int(hero_pos["x"]), int(hero_pos["z"]))
 
         return vector_feat, map_feat, reward_feats, legal_action
@@ -1296,6 +1338,12 @@ class Preprocessor:
                 search_radius=3,
             )
 
+        abb_penalty = self._compute_abb_penalty(
+            cur_hero_pos=cur_hero_pos,
+            prev_hero_pos=reward_feats.get("prev_hero_pos"),
+            prev_prev_hero_pos=reward_feats.get("prev_prev_hero_pos"),
+        )
+
         # 探索奖励
         newly_discovered_passable_count = reward_feats.get("newly_discovered_passable_count", 0)
         if self.step_no <= 1:
@@ -1331,10 +1379,11 @@ class Preprocessor:
             0.50 * los_break_reward,
             0.25 * flash_reward,
             0.20 * near_wall_penalty,
+            0.20 * abb_penalty,
             0.10 * exploration_rate * explore_reward,
             0.30 * danger_penalty,
-            0.30 * exploration_rate * dist_shaping_norm_weight * treasure_dist_reward,
-            0.30 * exploration_rate * dist_shaping_norm_weight * buff_dist_reward,
+            0.30 * dist_shaping_norm_weight * treasure_dist_reward,
+            0.30 * dist_shaping_norm_weight * buff_dist_reward,
         ]
 
         return reward_vector, sum(reward_vector)

@@ -15,6 +15,7 @@ class Config:
     # 非地图向量特征维度
     VECTOR_FEATURES = [
         4,   # hero
+        4,   # history pos
         7,   # monster1
         7,   # monster2
         8,   # ray collision
