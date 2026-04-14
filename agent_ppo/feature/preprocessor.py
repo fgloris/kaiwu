@@ -170,6 +170,7 @@ class Preprocessor:
 
         self.last_total_score = 0.0
         self.last_flash_count = 0
+        self.last_is_dangerous = False
 
         self.prev_hero_pos = None
 
@@ -766,18 +767,6 @@ class Preprocessor:
             "masked_local_passable": np.array(local_passable, copy=True),
         }
 
-    def _judge_situation(self, local_passable):
-        """
-        根据 boundary cluster 判断局势。
-        当前规则：连通的边界开口簇数量 <= 1 记为危险。
-        """
-        _, debug = self._compute_boundary_cluster_direction_scores(local_passable)
-        return {
-            "is_dangerous": bool(debug["is_dangerous"]),
-            "connected_opening_count": int(debug["connected_opening_count"]),
-            "connected_clusters": debug["connected_clusters"],
-        }
-
     def _select_reachable_opposite_boundary_cluster(self, connected_clusters, monster_feat, angle_cos_threshold=0.0):
         """
         从所有“能到达”的 boundary clusters（即 connected_clusters）中，
@@ -1229,12 +1218,15 @@ class Preprocessor:
             local_passable_21,
             monsters,
             hero_pos,
-            radius=3,
+            radius=5,
         )
-        boundary_cluster_feat, _boundary_cluster_debug = self._compute_boundary_cluster_direction_scores(
+        boundary_cluster_feat, boundary_cluster_info = self._compute_boundary_cluster_direction_scores(
             local_passable_21_masked
         )
-        situation_info = self._judge_situation(local_passable_21_masked)
+        connected_opening_count = _norm(boundary_cluster_info["connected_opening_count"], 5)
+        is_dangerous = _norm(int(boundary_cluster_info["is_dangerous"]), 1)
+        
+        situation_feat = np.array([connected_opening_count, is_dangerous], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         # 新增一组 8 维边缘连通簇方向特征，放在 ray collision 特征之后
@@ -1249,6 +1241,7 @@ class Preprocessor:
                 buff_feat,
                 legal_action_feat,
                 progress_feat,
+                situation_feat,
             ]
         )
 
@@ -1260,9 +1253,9 @@ class Preprocessor:
             "prev_hero_pos": self.prev_hero_pos,
             "last_action": int(last_action),
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
-            "connected_boundary_clusters": _boundary_cluster_debug["connected_clusters"],
-            "connected_opening_count": int(situation_info["connected_opening_count"]),
-            "is_dangerous": bool(situation_info["is_dangerous"]),
+            "connected_boundary_clusters": boundary_cluster_info["connected_clusters"],
+            "connected_opening_count": int(boundary_cluster_info["connected_opening_count"]),
+            "is_dangerous": bool(boundary_cluster_info["is_dangerous"]),
             "nearest_treasure_dist_norm": float(nearest_treasure_dist_norm),
             "nearest_buff_dist_norm": float(nearest_buff_dist_norm),
         }
@@ -1341,11 +1334,20 @@ class Preprocessor:
         else:
             self.last_monster_invisible_2 = False
         
-        # 闪现释放奖励
+        # 局势相关 reward settings
+        cur_is_dangerous = bool(reward_feats.get("is_dangerous", False))
+        danger_to_safe_reward = 1.0 if (self.last_is_dangerous and (not cur_is_dangerous)) else 0.0
+        danger_penalty = -1.0 if cur_is_dangerous else 0.0
+        self.last_is_dangerous = cur_is_dangerous
+
+        # 闪现释放奖励：仅当“危险 -> 不危险”时给大分
         flash_reward = 0.0
         flash_count = env_info.get("flash_count", 0)
         if (flash_count - self.last_flash_count) > 0:
-            flash_reward = los_break_reward + 0.5 * monster_dist_reward
+            if danger_to_safe_reward > 0.0:
+                flash_reward = 3.0
+            else:
+                flash_reward = -0.5
         self.last_flash_count = flash_count
 
         connected_boundary_clusters = reward_feats.get("connected_boundary_clusters", [])
@@ -1392,11 +1394,13 @@ class Preprocessor:
 
         survive_phase_weight = 1.00 + (self.step_no / 200)
 
-        treasure_dist_reward = self._compute_positive_dist_shaping(
+        obj_reward_scale = 1.5 if (not cur_is_dangerous) else 0.5
+
+        treasure_dist_reward = obj_reward_scale * self._compute_positive_dist_shaping(
             reward_feats.get("nearest_treasure_dist_norm", -1.0),
             "last_treasure_dist_norm",
         )
-        buff_dist_reward = 0.4 * self._compute_positive_dist_shaping(
+        buff_dist_reward = obj_reward_scale * 0.4 * self._compute_positive_dist_shaping(
             reward_feats.get("nearest_buff_dist_norm", -1.0),
             "last_buff_dist_norm",
         )
@@ -1405,14 +1409,14 @@ class Preprocessor:
         dist_shaping_norm_weight = 12.8
 
         reward_vector = [
-            0.0, #0.20 * score_gain,
-            0.08 * survive_phase_weight,
-            0.0, # 3.50 * dist_shaping_norm_weight * monster_dist_reward,
+            0.20 * score_gain,
+            0.02 * survive_phase_weight,
+            3.50 * dist_shaping_norm_weight * monster_dist_reward,
             0.50 * los_break_reward,
-            0.0, # 0.25 * flash_reward,
-            0.0, # 0.25 * offview_guidance_reward,
+            0.25 * flash_reward,
             0.20 * near_wall_penalty,
             0.08 * explore_reward,
+            0.30 * danger_penalty,
             0.30 * dist_shaping_norm_weight * treasure_dist_reward,
             0.30 * dist_shaping_norm_weight * buff_dist_reward,
         ]
