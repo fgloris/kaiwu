@@ -1115,7 +1115,7 @@ class Preprocessor:
             if (not self.last_monster_invisible_2) and cur_invisible_2:
                 los_break_reward += 1.0
             if self.last_monster_invisible_2 and (not cur_invisible_2):
-                los_break_reward -= 0.5
+                los_break_reward -= 1.0
         
         self.last_monster_invisible_1 = cur_invisible_1
         if second_exists:
@@ -1172,19 +1172,19 @@ class Preprocessor:
             explore_reward = 0.0
         else: explore_reward = _norm(newly_discovered_passable_count, 40.0)
 
-        survive_phase_weight = 1.00
+        survive_phase_weight = 1.00 + (self.step_no / 200)
 
         # final step reward vector
         dist_shaping_norm_weight = 12.8
 
         reward_vector = [
-            0.30 * score_gain,
-            0.02 * survive_phase_weight,
-            3.50 * dist_shaping_norm_weight * monster_dist_reward,
+            0.0, #0.20 * score_gain,
+            0.08 * survive_phase_weight,
+            0.0, # 3.50 * dist_shaping_norm_weight * monster_dist_reward,
             0.50 * los_break_reward,
-            0.25 * flash_reward,
-            0.20 * offview_guidance_reward,
-            0.08 * near_wall_penalty,
+            0.0, # 0.25 * flash_reward,
+            0.0, # 0.25 * offview_guidance_reward,
+            0.20 * near_wall_penalty,
             0.08 * explore_reward
         ]
 
