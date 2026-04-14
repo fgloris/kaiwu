@@ -1075,7 +1075,7 @@ class Preprocessor:
                 continue
             center_i = int(round(bx - gx0))
             center_j = int(round(bz - gy0))
-            _paint_square(map_feat[1], center_i, center_j, radius=0, value=0.45)
+            _paint_square(map_feat[1], center_i, center_j, radius=1, value=0.45)
 
         for treasure in treasures:
             tx, tz = self._entity_position(treasure, hero_pos["x"], hero_pos["z"])
@@ -1094,7 +1094,7 @@ class Preprocessor:
 
             center_i = int(round(mx - gx0))
             center_j = int(round(mz - gy0))
-            _paint_square(map_feat[2], center_i, center_j, radius=1, value=1.0)
+            _paint_square(map_feat[2], center_i, center_j, radius=2, value=1.0)
 
         ray_collision_feat = self._ray_collision_direction_scores(
             hero_pos["x"],
