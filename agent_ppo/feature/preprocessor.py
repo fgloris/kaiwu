@@ -61,6 +61,13 @@ SCAN_ANGLES_DEG = list(range(0, 360, 15))
 # 视野外怪物预测：每 N 帧重算一次 A* 路径
 MONSTER_ASTAR_REPLAN_INTERVAL = 1
 
+# Curriculum / 课程训练切换
+CURRICULUM_STAGE2_EPISODE = 2000
+SCORE_GAIN_WEIGHT_STAGE1 = 0.50
+SCORE_GAIN_WEIGHT_STAGE2 = 0.70
+SURVIVAL_WEIGHT_STAGE1 = 0.03
+SURVIVAL_WEIGHT_STAGE2 = 0.08
+
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
 
@@ -205,7 +212,12 @@ class Preprocessor:
     def __init__(self, logger=None):
         self.logger = logger
         self.total_train_steps = 0
+        self.curriculum_episode = 0
         self.reset()
+
+    def set_curriculum_episode(self, episode_cnt):
+        """Set current training episode for stage-aware curriculum and rewards."""
+        self.curriculum_episode = int(max(0, episode_cnt))
 
     def reset(self):
         self.step_no = 0
@@ -1702,9 +1714,13 @@ class Preprocessor:
 
         exploration_rate *= (2.0 if (not cur_is_dangerous) else 0.1)
 
+        in_stage2 = self.curriculum_episode >= CURRICULUM_STAGE2_EPISODE
+        score_gain_weight = SCORE_GAIN_WEIGHT_STAGE2 if in_stage2 else SCORE_GAIN_WEIGHT_STAGE1
+        survival_weight = SURVIVAL_WEIGHT_STAGE2 if in_stage2 else SURVIVAL_WEIGHT_STAGE1
+
         reward_vector = [
-            0.50 * score_gain,
-            0.03 * survive_phase_weight * abb_score,
+            score_gain_weight * score_gain,
+            survival_weight * survive_phase_weight * abb_score,
             0.50 * los_break_reward,
             0.25 * flash_reward,
             0.20 * near_wall_penalty,

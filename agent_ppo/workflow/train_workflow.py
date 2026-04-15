@@ -20,6 +20,9 @@ from tools.metrics_utils import get_training_metrics
 from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
 
+CURRICULUM_STAGE2_EPISODE = 2000
+MAP12_STAGE2_PROB = 0.60
+
 
 def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     last_save_model_time = time.time()
@@ -123,6 +126,30 @@ class EpisodeRunner:
                 eval_conf["map_random"] = False
         return eval_conf
 
+    def _make_train_conf_for_episode(self, episode_cnt):
+        train_conf = copy.deepcopy(self.train_usr_conf)
+        env_conf = train_conf.get("env_conf", train_conf) if isinstance(train_conf, dict) else train_conf
+        if not isinstance(env_conf, dict):
+            return train_conf
+
+        map_ids = list(env_conf.get("map", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
+        if episode_cnt < CURRICULUM_STAGE2_EPISODE:
+            return train_conf
+
+        focus_maps = [m for m in map_ids if m in (1, 2)]
+        other_maps = [m for m in map_ids if m not in (1, 2)]
+        if not focus_maps:
+            return train_conf
+
+        if np.random.rand() < MAP12_STAGE2_PROB or not other_maps:
+            chosen_map = int(np.random.choice(focus_maps))
+        else:
+            chosen_map = int(np.random.choice(other_maps))
+
+        env_conf["map"] = [chosen_map]
+        env_conf["map_random"] = False
+        return train_conf
+
     def run_episodes(self):
         """Run a single episode and yield collected samples.
 
@@ -137,22 +164,26 @@ class EpisodeRunner:
                 if training_metrics is not None:
                     self.logger.info(f"training_metrics is {training_metrics}")
 
+            collector = []
+            self.episode_cnt += 1
+
+            train_conf_this_episode = self._make_train_conf_for_episode(self.episode_cnt)
+
             # Reset env / 重置环境
-            env_obs = self.env.reset(self.train_usr_conf)
+            env_obs = self.env.reset(train_conf_this_episode)
 
             # Disaster recovery / 容灾处理
             if handle_disaster_recovery(env_obs, self.logger):
                 continue
 
             # Reset agent & load latest model / 重置 Agent 并加载最新模型
+            if hasattr(self.agent, "preprocessor") and hasattr(self.agent.preprocessor, "set_curriculum_episode"):
+                self.agent.preprocessor.set_curriculum_episode(self.episode_cnt)
             self.agent.reset(env_obs)
             self.agent.load_model(id="latest")
 
             # Initial observation / 初始观测处理
             obs_data, remain_info = self.agent.observation_process(env_obs)
-
-            collector = []
-            self.episode_cnt += 1
             done = False
             step = 0
             total_reward = 0.0
