@@ -59,7 +59,7 @@ DIR8 = [
 SCAN_ANGLES_DEG = list(range(0, 360, 15))
 
 # 视野外怪物预测：每 N 帧重算一次 A* 路径
-MONSTER_ASTAR_REPLAN_INTERVAL = 4
+MONSTER_ASTAR_REPLAN_INTERVAL = 1
 
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
@@ -149,6 +149,57 @@ def _paint_square(mask, center_i, center_j, radius=1, value=1.0):
             jj = center_j + dj
             if 0 <= ii < h and 0 <= jj < w:
                 mask[ii, jj] = value
+
+def _paint_path(layer, path, gx0, gy0, path_value=0.35, end_value=1.0, radius=0):
+    """
+    将全局路径 path=[(x,z), ...] 画到局部 layer 上。
+    - 中间路径点使用较低强度
+    - 路径起点/终点可使用更高强度
+    """
+    if path is None or len(path) == 0:
+        return
+
+    h, w = layer.shape
+    last_idx = len(path) - 1
+    for idx, (px, pz) in enumerate(path):
+        li = int(px - gx0)
+        lj = int(pz - gy0)
+        if not (0 <= li < h and 0 <= lj < w):
+            continue
+
+        value = end_value if (idx == 0 or idx == last_idx) else path_value
+        if radius <= 0:
+            layer[li, lj] = value
+        else:
+            _paint_square(layer, li, lj, radius=radius, value=value)
+
+def _paint_recent_positions_on_passable(layer, positions, gx0, gy0):
+    """
+    将最近若干帧自身轨迹画到 passable layer 上。
+    采用递增强度，越新的位置越明显。
+    """
+    if positions is None:
+        return
+
+    positions = list(positions)
+    if not positions:
+        return
+
+    total = len(positions)
+    h, w = layer.shape
+    for idx, (px, pz) in enumerate(positions):
+        li = int(px - gx0)
+        lj = int(pz - gy0)
+        if not (0 <= li < h and 0 <= lj < w):
+            continue
+        # 仅在可通行位置上覆盖，避免把障碍误画亮
+        if layer[li, lj] <= 0.0:
+            continue
+        if total == 1:
+            value = 0.6
+        else:
+            value = 0.2 + 0.6 * (idx / float(total - 1))
+        layer[li, lj] = value
 
 class Preprocessor:
     def __init__(self, logger=None):
@@ -928,19 +979,25 @@ class Preprocessor:
 
     def _update_predicted_monster_pos(self, idx, monster, hero_pos, env_info):
         """
-        视野内：直接用真实位置，并刷新 last_seen。
-        视野外：从上一预测位置/最后可见位置出发，
-        每 N 帧重算一次 A*，中间沿缓存路径每帧按速度/加速阶段推进多步。
+        视野内：
+        - 直接使用真实位置
+        - 每帧基于真实位置到 hero 重新计算一次 A* 路径，并缓存到 monster layer
+        视野外：
+        - 从上一预测位置/最后可见位置出发
+        - 每 N 帧重算一次 A*，中间沿缓存路径每帧推进若干步
         """
         is_in_view = int(monster.get("is_in_view", 0)) > 0
+        hero_xy = (int(hero_pos["x"]), int(hero_pos["z"]))
 
         if is_in_view and ("pos" in monster) and (monster["pos"] is not None):
             mx = int(monster["pos"]["x"])
             mz = int(monster["pos"]["z"])
             self.last_seen_monster_pos[idx] = (mx, mz)
             self.predicted_monster_pos[idx] = (mx, mz)
-            self.monster_predicted_paths[idx] = [(mx, mz)]
-            self.monster_replan_counters[idx] = 0
+
+            path = self._astar_path((mx, mz), hero_xy)
+            self.monster_predicted_paths[idx] = path if path else [(mx, mz)]
+            self.monster_replan_counters[idx] = max(1, int(MONSTER_ASTAR_REPLAN_INTERVAL))
             return mx, mz
 
         start_pos = self.predicted_monster_pos[idx]
@@ -952,7 +1009,7 @@ class Preprocessor:
         predicted = self._maybe_replan_monster_path(
             idx=idx,
             start_pos=start_pos,
-            hero_pos=(int(hero_pos["x"]), int(hero_pos["z"])),
+            hero_pos=hero_xy,
             step_count=step_count,
         )
 
@@ -1259,7 +1316,6 @@ class Preprocessor:
         buff_remain_norm = _norm(hero["buff_remaining_time"], MAX_BUFF_DURATION)
 
         hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
-        history_pos_feat = self._build_history_position_feat(hero_pos)
 
         # 怪物特征
         monsters = frame_state.get("monsters", [])
@@ -1360,15 +1416,35 @@ class Preprocessor:
                 gy = gy0 + j
                 if 0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT:
                     map_feat[0, i, j] = float(self.passable_map[gx, gy])
+
+        # 在 passable layer 上叠加自身最近轨迹
+        recent_self_path = list(self.pos_history) + [(int(hero_pos["x"]), int(hero_pos["z"]))]
+        _paint_recent_positions_on_passable(
+            map_feat[0],
+            recent_self_path,
+            gx0=gx0,
+            gy0=gy0,
+        )
         
         # _log_gray_map_as_binary(self.logger, map_feat[0], title=f"map:{self.step_no}")
         # _log_gray_map_as_binary(self.logger, map_feat[1], title=f"vis:{self.step_no}")
 
-        # 第二层：monster mask
-        # 规则：
-        # - 视野内：用精确位置
-        # - 视野外但怪物存在：用粗方向 + 桶距离估计位置
+        # 第二层：monster layer
+        # - 先把怪物追击 hero 的 A* 路径画出来
+        # - 再把当前真实/预测怪物位置画得更亮
         for i, m in enumerate(monsters[:2]):
+            path = self.monster_predicted_paths[i] if i < len(self.monster_predicted_paths) else []
+            if path is not None and len(path) > 0:
+                _paint_path(
+                    map_feat[1],
+                    path,
+                    gx0=gx0,
+                    gy0=gy0,
+                    path_value=0.35,
+                    end_value=0.65,
+                    radius=0,
+                )
+
             if int(m.get("is_in_view", 0)) > 0 and ("pos" in m) and (m["pos"] is not None):
                 mx = int(m["pos"]["x"])
                 mz = int(m["pos"]["z"])
@@ -1462,7 +1538,6 @@ class Preprocessor:
         vector_feat = np.concatenate(
             [
                 hero_feat,
-                history_pos_feat,
                 monster_feats[0],
                 monster_feats[1],
                 ray_collision_feat,
