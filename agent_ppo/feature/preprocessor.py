@@ -22,8 +22,6 @@ LOCAL_MAP_SIZE = 21
 LOCAL_MAP_HALF = 10
 VIEW_MAP_SIZE = 21
 
-# Max monster speed / 最大怪物速度
-MAX_MONSTER_SPEED = 5.0
 # Max distance bucket / 距离桶最大值
 MAX_DIST_BUCKET = 5.0
 # Max flash cooldown / 最大闪现冷却步数
@@ -928,11 +926,11 @@ class Preprocessor:
             cur = parent
         return cur
 
-    def _update_predicted_monster_pos(self, idx, monster, hero_pos):
+    def _update_predicted_monster_pos(self, idx, monster, hero_pos, env_info):
         """
         视野内：直接用真实位置，并刷新 last_seen。
         视野外：从上一预测位置/最后可见位置出发，
-        每 N 帧重算一次 A*，中间沿缓存路径每帧走一步。
+        每 N 帧重算一次 A*，中间沿缓存路径每帧按速度/加速阶段推进多步。
         """
         is_in_view = int(monster.get("is_in_view", 0)) > 0
 
@@ -949,10 +947,13 @@ class Preprocessor:
         if start_pos is None:
             start_pos = self.last_seen_monster_pos[idx]
 
+        step_count = monster.get("speed", 1)
+
         predicted = self._maybe_replan_monster_path(
             idx=idx,
             start_pos=start_pos,
             hero_pos=(int(hero_pos["x"]), int(hero_pos["z"])),
+            step_count=step_count,
         )
 
         if predicted is not None:
@@ -1136,8 +1137,6 @@ class Preprocessor:
         penalty = -max(0.0, 1.0 - abb_score / max(self.abb_safe_score, 1e-6))
         return abb_score, penalty
 
-
-
     def _astar_path(self, start, goal):
         """
         在已知且可通行区域上做 8 邻接 A*。
@@ -1201,9 +1200,9 @@ class Preprocessor:
 
         return []
 
-    def _maybe_replan_monster_path(self, idx, start_pos, hero_pos):
+    def _maybe_replan_monster_path(self, idx, start_pos, hero_pos, step_count):
         """
-        每 N 帧重算一次 A*；中间沿已有路径前进一步。
+        每 N 帧重算一次 A*；中间沿已有路径每帧推进 step_count 步。
         """
         if start_pos is None or hero_pos is None:
             self.monster_predicted_paths[idx] = []
@@ -1223,12 +1222,15 @@ class Preprocessor:
         path = self.monster_predicted_paths[idx]
         cur_pos = path[0] if path else start_pos
 
-        if len(path) > 1:
-            cur_pos = path[1]
-            self.monster_predicted_paths[idx] = path[1:]
-        else:
-            self.monster_predicted_paths[idx] = [cur_pos]
+        steps_to_take = max(1, int(step_count))
+        for _ in range(steps_to_take):
+            if len(path) > 1:
+                cur_pos = path[1]
+                path = path[1:]
+            else:
+                break
 
+        self.monster_predicted_paths[idx] = path if path else [cur_pos]
         self.monster_replan_counters[idx] -= 1
         return cur_pos
 
@@ -1269,7 +1271,7 @@ class Preprocessor:
                 m = monsters[i]
 
                 prev_pred_pos = self.predicted_monster_pos[i]
-                pred_pos = self._update_predicted_monster_pos(i, m, hero_pos)
+                pred_pos = self._update_predicted_monster_pos(i, m, hero_pos, env_info)
 
                 is_in_view = float(m.get("is_in_view", 0))
                 prev_invisible = self.last_monster_invisible_1 if i == 0 else self.last_monster_invisible_2
@@ -1285,7 +1287,7 @@ class Preprocessor:
                     self.monster_prediction_error_count += 1
                     self.monster_prediction_error_avg = self.monster_prediction_error_sum / max(1, self.monster_prediction_error_count)
 
-                m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED) if is_in_view else 0.0
+                m_speed_norm = _norm(m.get("speed", 1), 2) if is_in_view else 0.0
 
                 rel_x = 0.0
                 rel_z = 0.0
@@ -1480,7 +1482,6 @@ class Preprocessor:
             "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
             "last_action": int(last_action),
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
-            "connected_boundary_clusters": boundary_cluster_info["connected_clusters"],
             "connected_opening_count": int(boundary_cluster_info["connected_opening_count"]),
             "is_dangerous": bool(boundary_cluster_info["is_dangerous"]),
             "nearest_treasure_dist_norm": float(nearest_treasure_dist_norm),
@@ -1584,9 +1585,6 @@ class Preprocessor:
                 flash_reward = -0.5
         self.last_flash_count = flash_count
 
-        connected_boundary_clusters = reward_feats.get("connected_boundary_clusters", [])
-        last_action = reward_feats.get("last_action", -1)
-
         # 靠墙惩罚：只在 hero 周围 5x5 小窗口内查最近已知墙，减少计算量
         near_wall_penalty = 0.0
         if cur_hero_pos is not None:
@@ -1646,7 +1644,4 @@ class Preprocessor:
             self.monster_prediction_error_avg,
         ]
 
-        reward_sum = sum(reward_vector[:-2]) + \
-            1.50 * dist_shaping_norm_weight * monster_dist_reward
-
-        return reward_vector, reward_sum
+        return reward_vector, sum(reward_vector[:-2]) + 1.50 * dist_shaping_norm_weight * monster_dist_reward

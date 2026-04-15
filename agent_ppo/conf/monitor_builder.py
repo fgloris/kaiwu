@@ -141,7 +141,19 @@ def build_monitor():
         .add_metric(metrics_name="r_treasure_dist_sum", expr="avg(r_treasure_dist_sum{})")
         .add_metric(metrics_name="r_buff_dist_sum", expr="avg(r_buff_dist_sum{})")
         .add_metric(metrics_name="r_monster_dist_sum", expr="avg(r_monster_dist_sum{})")
-        .add_metric(metrics_name="r_monster_prediction_error_sum", expr="avg(r_monster_prediction_error_sum{})")
+        .end_panel()
+        .end_group()
+
+        .add_group(
+            group_name="怪物预测监控",
+            group_name_en="monster_prediction_monitor",
+        )
+        .add_panel(
+            name="怪物预测误差均值",
+            name_en="monster_prediction_error",
+            type="line",
+        )
+        .add_metric(metrics_name="monster_prediction_error_avg", expr="avg(monster_prediction_error_avg{})")
         .end_panel()
         .end_group()
         .build()

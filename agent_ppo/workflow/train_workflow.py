@@ -168,7 +168,7 @@ class EpisodeRunner:
                 "r_treasure_dist_sum",
                 "r_buff_dist_sum",
                 "r_monster_dist_sum",
-                "r_monster_prediction_error_sum"
+                "monster_prediction_error_avg"
             ]
             episode_reward_vec_sum = np.zeros(len(reward_vec_keys), dtype=np.float32)
 
@@ -202,7 +202,9 @@ class EpisodeRunner:
                     copy_n = min(len(reward_vec_keys), reward_vector.shape[0])
                     aligned_reward_vector[:copy_n] = reward_vector[:copy_n]
                     reward_vector = aligned_reward_vector
-                episode_reward_vec_sum += reward_vector
+                if reward_vector.shape[0] > 0:
+                    episode_reward_vec_sum[:-1] += reward_vector[:-1]
+                    episode_reward_vec_sum[-1] = reward_vector[-1]
                 total_reward += float(reward[0])
 
                 # Terminal reward / 终局奖励
