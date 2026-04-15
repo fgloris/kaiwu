@@ -176,6 +176,7 @@ class Preprocessor:
         self.last_best_treasure_dist = None
         self.last_best_treasure_priority = 0.0
         self.last_flash_count = 0
+        self.last_move_dir_idx = None
 
         self.prev_hero_pos = None
 
@@ -230,6 +231,8 @@ class Preprocessor:
         """Select a treasure target balancing distance and safety.
 
         选择一个兼顾距离与安全性的宝箱目标，给 reward shaping 用。
+        这版会更愿意把“近处、顺手可拿”的宝箱当成目标，但危险门控仍然始终存在，
+        即便在前期也尽量避免因为资源吸引而直冲怪物方向。
         """
         if not treasures:
             return None, 0.0, None
@@ -241,18 +244,47 @@ class Preprocessor:
         for treasure in treasures:
             tx, tz = self._entity_position(treasure, hero_x, hero_z)
             hero_dist = float(np.hypot(tx - hero_x, tz - hero_z))
-            dist_factor = float(np.clip(1.0 - hero_dist / 90.0, 0.0, 1.0))
+            dist_factor = float(np.clip(1.0 - hero_dist / 80.0, 0.0, 1.0))
 
             if monster_positions:
                 min_monster_dist = min(float(np.hypot(tx - mx, tz - mz)) for mx, mz in monster_positions)
             else:
                 min_monster_dist = 180.0
-            safety_factor = float(np.clip((min_monster_dist - 8.0) / 28.0, 0.0, 1.0))
+
+            safety_factor = float(np.clip((min_monster_dist - 11.0) / 30.0, 0.0, 1.0))
+            danger_gate = float(np.clip((min_monster_dist - 11.5) / 18.0, 0.0, 1.0))
+
+            near_bonus = 0.0
+            if hero_dist <= 1.5:
+                near_bonus = 0.26
+            elif hero_dist <= 3.0:
+                near_bonus = 0.14
+            elif hero_dist <= 5.0:
+                near_bonus = 0.05
+
+            opportunistic_bonus = 0.0
+            if hero_dist <= 2.2 and min_monster_dist >= 16.0:
+                opportunistic_bonus = 0.08
 
             if high_pressure:
-                priority = 0.40 * dist_factor + 0.60 * safety_factor
+                priority = (
+                    (0.28 * dist_factor + 0.72 * safety_factor)
+                    * (0.20 + 0.80 * danger_gate)
+                    + 0.45 * near_bonus
+                    + opportunistic_bonus
+                )
             else:
-                priority = 0.65 * dist_factor + 0.35 * safety_factor
+                priority = (
+                    (0.60 * dist_factor + 0.40 * safety_factor)
+                    * (0.35 + 0.65 * danger_gate)
+                    + near_bonus
+                    + opportunistic_bonus
+                )
+
+            if min_monster_dist < 12.0:
+                priority *= 0.55
+            if min_monster_dist < 8.0:
+                priority *= 0.20
 
             if priority > best_priority:
                 best_priority = priority
@@ -261,7 +293,7 @@ class Preprocessor:
 
         if best_priority < 0.0:
             return None, 0.0, None
-        return best_dist, float(best_priority), best_pos
+        return best_dist, float(np.clip(best_priority, 0.0, 1.0)), best_pos
 
     def update_global_maps(self, hero_x, hero_y, map_info):
         """
@@ -891,6 +923,30 @@ class Preprocessor:
             return None
         return float(dx / norm), float(dz / norm)
 
+    def _action_dir_index(self, action_idx, movement_only=False):
+        """Return the direction index in [0, 7].
+
+        - movement_only=True 时，闪现动作返回 None
+        - 否则闪现动作会映射到对应方向 0~7
+        """
+        if action_idx is None:
+            return None
+        action_idx = int(action_idx)
+        if 0 <= action_idx < 8:
+            return action_idx
+        if 8 <= action_idx < 16 and not movement_only:
+            return action_idx - 8
+        return None
+
+    def _direction_safety_score(self, dir_idx, ray_collision_feat, boundary_cluster_feat):
+        """Combine local corridor safety and reachable-boundary openness for one direction."""
+        if dir_idx is None or not (0 <= int(dir_idx) < 8):
+            return 0.0
+        dir_idx = int(dir_idx)
+        ray_score = float(ray_collision_feat[dir_idx]) if ray_collision_feat is not None else 0.0
+        boundary_score = float(boundary_cluster_feat[dir_idx]) if boundary_cluster_feat is not None else 0.0
+        return float(np.clip(0.65 * ray_score + 0.35 * boundary_score, 0.0, 1.0))
+
     def _compute_offview_guidance_reward(
         self,
         monster_feat,
@@ -1075,7 +1131,7 @@ class Preprocessor:
                 continue
             center_i = int(round(bx - gx0))
             center_j = int(round(bz - gy0))
-            _paint_square(map_feat[1], center_i, center_j, radius=1, value=0.45)
+            _paint_square(map_feat[1], center_i, center_j, radius=0, value=0.25)
 
         for treasure in treasures:
             tx, tz = self._entity_position(treasure, hero_pos["x"], hero_pos["z"])
@@ -1083,7 +1139,7 @@ class Preprocessor:
                 continue
             center_i = int(round(tx - gx0))
             center_j = int(round(tz - gy0))
-            _paint_square(map_feat[1], center_i, center_j, radius=1, value=1.00)
+            _paint_square(map_feat[1], center_i, center_j, radius=1, value=0.65)
 
         # 怪物通道独立出来，避免和资源互相覆盖。
         # 视野内用精确位置，视野外用方向+距离桶估算。
@@ -1094,7 +1150,7 @@ class Preprocessor:
 
             center_i = int(round(mx - gx0))
             center_j = int(round(mz - gy0))
-            _paint_square(map_feat[2], center_i, center_j, radius=2, value=1.0)
+            _paint_square(map_feat[2], center_i, center_j, radius=1, value=1.0)
 
         ray_collision_feat = self._ray_collision_direction_scores(
             hero_pos["x"],
@@ -1178,6 +1234,8 @@ class Preprocessor:
             "best_treasure_priority": best_treasure_priority,
             "best_treasure_pos": best_treasure_pos,
             "high_pressure": float(high_pressure),
+            "ray_collision_feat": ray_collision_feat.copy(),
+            "boundary_cluster_feat": boundary_cluster_feat.copy(),
         }
 
         self.prev_hero_pos = (int(hero_pos["x"]), int(hero_pos["z"]))
@@ -1297,13 +1355,68 @@ class Preprocessor:
 
         best_treasure_dist = reward_feats.get("best_treasure_dist")
         best_treasure_priority = float(reward_feats.get("best_treasure_priority", 0.0) or 0.0)
-        treasure_score_reward = 0.0
-        if treasure_score_gain > 0:
-            treasure_score_reward = 2.0 * min(treasure_score_gain / 100.0, 2.0)
+        best_treasure_pos = reward_feats.get("best_treasure_pos")
+        ray_collision_feat = reward_feats.get("ray_collision_feat")
+        boundary_cluster_feat = reward_feats.get("boundary_cluster_feat")
 
-        treasure_count_reward = 0.55 * float(treasure_count_delta)
-        buff_reward = 0.25 * float(buff_delta)
-        step_score_reward = 0.02 * min(step_score_gain / 1.5, 1.0)
+        step_score_reward = 0.0
+
+        step_progress = float(reward_feats["progress_feats"][0])
+        if high_pressure:
+            treasure_sparse_phase_weight = 0.42
+            treasure_approach_phase_weight = 0.30
+        elif step_progress < 0.30:
+            treasure_sparse_phase_weight = 1.16
+            treasure_approach_phase_weight = 1.26
+        elif step_progress < 0.55:
+            treasure_sparse_phase_weight = 0.96
+            treasure_approach_phase_weight = 0.90
+        else:
+            treasure_sparse_phase_weight = 0.74
+            treasure_approach_phase_weight = 0.60
+
+        treasure_score_reward = 0.10 * treasure_score_gain * treasure_sparse_phase_weight
+        treasure_count_reward = 1.18 * float(treasure_count_delta) * treasure_sparse_phase_weight
+        buff_reward = 0.28 * float(buff_delta)
+
+        cur_min_monster_dist_norm = min(float(m1[4]), float(m2[4]) if second_exists else 1.0)
+        last_min_monster_dist_norm = prev_dist_1 if prev_dist_1 >= 0 else cur_min_monster_dist_norm
+        if second_exists and prev_dist_2 >= 0:
+            last_min_monster_dist_norm = min(last_min_monster_dist_norm, prev_dist_2)
+        monster_closer = last_min_monster_dist_norm - cur_min_monster_dist_norm
+
+        action_idx = int(last_action) if last_action is not None else -1
+        current_move_dir_idx = self._action_dir_index(action_idx, movement_only=True)
+        current_dir_idx = self._action_dir_index(action_idx, movement_only=False)
+        current_action_vec = self._action_to_dir_vec(action_idx)
+        current_dir_safety = self._direction_safety_score(current_dir_idx, ray_collision_feat, boundary_cluster_feat)
+
+        move_dist = 0.0
+        prev_hero_pos = reward_feats.get("prev_hero_pos")
+        if prev_hero_pos is not None and cur_hero_pos is not None:
+            move_dist = float(np.hypot(cur_hero_pos[0] - prev_hero_pos[0], cur_hero_pos[1] - prev_hero_pos[1]))
+
+        invalid_move_penalty = 0.0
+        if current_move_dir_idx is not None and prev_hero_pos is not None and move_dist < 0.5:
+            invalid_move_penalty = -0.15
+
+        nearest_monster_feat = m1
+        if second_exists and float(m2[4]) < float(m1[4]):
+            nearest_monster_feat = m2
+        toward_nearest_monster = 0.0
+        if current_action_vec is not None:
+            toward_nearest_monster = float(
+                current_action_vec[0] * float(nearest_monster_feat[5])
+                + current_action_vec[1] * float(nearest_monster_feat[6])
+            )
+
+        treasure_align = 0.0
+        if current_action_vec is not None and best_treasure_pos is not None and cur_hero_pos is not None:
+            tvx = float(best_treasure_pos[0] - cur_hero_pos[0])
+            tvz = float(best_treasure_pos[1] - cur_hero_pos[1])
+            tnorm = float(np.hypot(tvx, tvz))
+            if tnorm > 1e-6:
+                treasure_align = float(current_action_vec[0] * (tvx / tnorm) + current_action_vec[1] * (tvz / tnorm))
 
         treasure_approach_reward = 0.0
         if (
@@ -1312,18 +1425,115 @@ class Preprocessor:
             and prev_dist_1 >= 0
         ):
             approach = self.last_best_treasure_dist - best_treasure_dist
-            cur_min_monster_dist_norm = min(float(m1[4]), float(m2[4]) if second_exists else 1.0)
-            last_min_monster_dist_norm = prev_dist_1
-            if second_exists and prev_dist_2 >= 0:
-                last_min_monster_dist_norm = min(last_min_monster_dist_norm, prev_dist_2)
-            monster_closer = last_min_monster_dist_norm - cur_min_monster_dist_norm
-            if approach > 0 and monster_closer < 0.05 and best_treasure_priority > 0.10:
-                phase_scale = 1.0 if not high_pressure else 0.45
-                treasure_approach_reward = 0.08 * phase_scale * best_treasure_priority * float(np.clip(approach / 6.0, 0.0, 1.0))
+            if (
+                approach > 0
+                and best_treasure_priority > 0.14
+                and treasure_align > 0.02
+                and monster_closer < 0.03
+                and cur_min_monster_dist_norm > 0.18
+                and toward_nearest_monster < 0.18
+            ):
+                dir_scale = 0.72 + 0.28 * float(np.clip((current_dir_safety - 0.10) / 0.90, 0.0, 1.0))
+                wall_scale = 0.72 + 0.28 * float(np.clip((near_wall_penalty + 1.0) / 1.0, 0.0, 1.0))
+                danger_scale = float(np.clip((cur_min_monster_dist_norm - 0.18) / 0.32, 0.0, 1.0))
+                anti_monster_scale = float(np.clip((0.22 - toward_nearest_monster) / 0.40, 0.0, 1.0))
+                align_scale = float(np.clip((treasure_align + 0.10) / 1.10, 0.0, 1.0))
+                treasure_approach_reward = (
+                    0.088
+                    * treasure_approach_phase_weight
+                    * best_treasure_priority
+                    * float(np.clip(approach / 4.0, 0.0, 1.0))
+                    * align_scale
+                    * (0.65 + 0.35 * danger_scale)
+                    * dir_scale
+                    * wall_scale
+                    * anti_monster_scale
+                )
 
         priority_tracking_reward = 0.0
-        if self.last_best_treasure_priority > 0 and best_treasure_priority > 0 and not high_pressure:
-            priority_tracking_reward = 0.025 * max(best_treasure_priority - 0.45, 0.0)
+        if (
+            self.last_best_treasure_priority > 0
+            and best_treasure_priority > 0
+            and cur_min_monster_dist_norm > 0.20
+            and toward_nearest_monster < 0.16
+        ):
+            track_dir_scale = 0.78 + 0.22 * float(np.clip((current_dir_safety - 0.08) / 0.92, 0.0, 1.0))
+            priority_tracking_reward = (
+                0.022
+                * treasure_approach_phase_weight
+                * max(best_treasure_priority - 0.42, 0.0)
+                * track_dir_scale
+            )
+
+        opportunistic_near_treasure_reward = 0.0
+        if (
+            best_treasure_dist is not None
+            and best_treasure_dist <= 2.2
+            and best_treasure_priority > 0.10
+            and move_dist > 0.5
+            and monster_closer < 0.035
+            and cur_min_monster_dist_norm > 0.14
+            and toward_nearest_monster < 0.24
+        ):
+            near_scale = float(np.clip((2.2 - best_treasure_dist) / 2.2, 0.0, 1.0))
+            dir_scale = 0.72 + 0.28 * float(np.clip((current_dir_safety - 0.10) / 0.90, 0.0, 1.0))
+            opportunistic_near_treasure_reward = (
+                0.030
+                * (0.65 + 0.35 * treasure_approach_phase_weight)
+                * best_treasure_priority
+                * near_scale
+                * dir_scale
+            )
+
+        danger_treasure_penalty = 0.0
+        generic_danger_move_penalty = 0.0
+        if current_action_vec is not None:
+            danger_level = 0
+            if cur_min_monster_dist_norm < 0.16:
+                danger_level += 1
+            if monster_closer > 0.02:
+                danger_level += 1
+            if toward_nearest_monster > 0.22:
+                danger_level += 1
+            if current_dir_safety < 0.22:
+                danger_level += 1
+            if near_wall_penalty < -0.62:
+                danger_level += 1
+            if danger_level >= 2:
+                generic_danger_move_penalty = -0.018 * float(np.clip(danger_level / 4.0, 0.0, 1.0))
+
+        same_direction_reward = 0.0
+        repeated_bad_direction_penalty = 0.0
+        if current_move_dir_idx is not None and self.last_move_dir_idx is not None and current_move_dir_idx == self.last_move_dir_idx:
+            same_dir_safe = (
+                move_dist > 0.5
+                and not high_pressure
+                and cur_min_monster_dist_norm > 0.22
+                and monster_closer <= 0.005
+                and toward_nearest_monster < 0.05
+                and current_dir_safety > 0.42
+                and near_wall_penalty > -0.30
+            )
+            if same_dir_safe:
+                same_direction_reward = 0.010 + 0.015 * float(np.clip((current_dir_safety - 0.40) / 0.60, 0.0, 1.0))
+            else:
+                bad_count = 0
+                if move_dist < 0.5:
+                    bad_count += 1
+                if current_dir_safety < 0.25:
+                    bad_count += 1
+                if cur_min_monster_dist_norm < 0.16 or monster_closer > 0.02 or toward_nearest_monster > 0.18:
+                    bad_count += 1
+                if near_wall_penalty < -0.55:
+                    bad_count += 1
+                if bad_count >= 2:
+                    repeated_bad_direction_penalty = -0.03 * float(np.clip(bad_count / 3.0, 0.0, 1.0))
+
+        safe_escape_direction_reward = 0.0
+        if current_dir_idx is not None and (high_pressure or cur_min_monster_dist_norm < 0.24):
+            away_monster = max(-toward_nearest_monster, 0.0)
+            if current_dir_safety > 0.34 and away_monster > 0.10:
+                safe_escape_direction_reward = 0.05 * current_dir_safety * away_monster
 
         survive_phase_weight = 1.00
         dist_shaping_norm_weight = 12.8
@@ -1340,6 +1550,13 @@ class Preprocessor:
             buff_reward,
             treasure_approach_reward,
             priority_tracking_reward,
+            opportunistic_near_treasure_reward,
+            danger_treasure_penalty,
+            generic_danger_move_penalty,
+            same_direction_reward,
+            repeated_bad_direction_penalty,
+            safe_escape_direction_reward,
+            invalid_move_penalty,
             0.20 * offview_guidance_reward,
             0.08 * near_wall_penalty,
             0.08 * explore_reward,
@@ -1358,5 +1575,6 @@ class Preprocessor:
         self.last_collected_buff = cur_buff_count
         self.last_best_treasure_dist = best_treasure_dist
         self.last_best_treasure_priority = best_treasure_priority
+        self.last_move_dir_idx = current_move_dir_idx if current_move_dir_idx is not None else None
 
         return reward_vector, sum(reward_vector)
