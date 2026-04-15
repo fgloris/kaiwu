@@ -194,6 +194,9 @@ class Preprocessor:
         # 怪物视野外预测位置缓存
         self.last_seen_monster_pos = [None, None]
         self.predicted_monster_pos = [None, None]
+        self.monster_prediction_error_sum = 0.0
+        self.monster_prediction_error_count = 0
+        self.monster_prediction_error_avg = 0.0
 
     def update_global_maps(self, hero_x, hero_y, map_info):
         """
@@ -1265,11 +1268,22 @@ class Preprocessor:
             if i < len(monsters):
                 m = monsters[i]
 
+                prev_pred_pos = self.predicted_monster_pos[i]
                 pred_pos = self._update_predicted_monster_pos(i, m, hero_pos)
 
                 is_in_view = float(m.get("is_in_view", 0))
                 prev_invisible = self.last_monster_invisible_1 if i == 0 else self.last_monster_invisible_2
                 monster_reappeared[i] = bool(is_in_view > 0.5 and prev_invisible)
+
+                if monster_reappeared[i] and prev_pred_pos is not None and ("pos" in m) and (m["pos"] is not None):
+                    true_mx = int(m["pos"]["x"])
+                    true_mz = int(m["pos"]["z"])
+                    pred_mx = int(prev_pred_pos[0])
+                    pred_mz = int(prev_pred_pos[1])
+                    pred_error = float(np.hypot(true_mx - pred_mx, true_mz - pred_mz))
+                    self.monster_prediction_error_sum += pred_error
+                    self.monster_prediction_error_count += 1
+                    self.monster_prediction_error_avg = self.monster_prediction_error_sum / max(1, self.monster_prediction_error_count)
 
                 m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED) if is_in_view else 0.0
 
@@ -1620,7 +1634,6 @@ class Preprocessor:
         reward_vector = [
             0.50 * score_gain,
             0.03 * survive_phase_weight * survive_reward,
-            3.50 * dist_shaping_norm_weight * monster_dist_reward,
             0.50 * los_break_reward,
             0.25 * flash_reward,
             0.20 * near_wall_penalty,
@@ -1629,6 +1642,11 @@ class Preprocessor:
             0.30 * danger_penalty,
             0.30 * dist_shaping_norm_weight * treasure_dist_reward,
             0.30 * dist_shaping_norm_weight * buff_dist_reward,
+            abs(1.50 * dist_shaping_norm_weight * monster_dist_reward),
+            self.monster_prediction_error_avg,
         ]
 
-        return reward_vector, sum(reward_vector[:2]) + sum(reward_vector[3:]) + 3.50 * dist_shaping_norm_weight * monster_dist_reward
+        reward_sum = sum(reward_vector[:-2]) + \
+            1.50 * dist_shaping_norm_weight * monster_dist_reward
+
+        return reward_vector, reward_sum
