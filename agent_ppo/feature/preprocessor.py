@@ -150,7 +150,7 @@ def _paint_square(mask, center_i, center_j, radius=1, value=1.0):
             if 0 <= ii < h and 0 <= jj < w:
                 mask[ii, jj] = value
 
-def _paint_path(layer, path, gx0, gy0, path_value=0.35, end_value=1.0, radius=0):
+def _paint_path(layer, path, gx0, gy0, path_value=0.35, radius=0):
     """
     将全局路径 path=[(x,z), ...] 画到局部 layer 上。
     - 中间路径点使用较低强度
@@ -167,7 +167,7 @@ def _paint_path(layer, path, gx0, gy0, path_value=0.35, end_value=1.0, radius=0)
         if not (0 <= li < h and 0 <= lj < w):
             continue
 
-        value = end_value if (idx == 0 or idx == last_idx) else path_value
+        value = path_value
         if radius <= 0:
             layer[li, lj] = value
         else:
@@ -198,7 +198,7 @@ def _paint_recent_positions_on_passable(layer, positions, gx0, gy0):
         if total == 1:
             value = 0.6
         else:
-            value = 0.2 + 0.6 * (idx / float(total - 1))
+            value = 0.8 - 0.6 * (idx / float(total - 1))
         layer[li, lj] = value
 
 class Preprocessor:
@@ -1364,10 +1364,10 @@ class Preprocessor:
                         dir_x = dx / raw_dist
                         dir_z = dz / raw_dist
                 else:
-                    if pred_pos is None:
-                        est_mx, est_mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
-                    else:
-                        est_mx, est_mz = pred_pos
+                    # 视野外的 monster feature 仍保持“模糊”表征：
+                    # 只使用环境给的相对方向 + 距离桶估计，
+                    # 不把 A* 预测位置直接注入 vector feature。
+                    est_mx, est_mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
                     dx = float(est_mx - hero_pos["x"])
                     dz = float(est_mz - hero_pos["z"])
                     rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
@@ -1441,7 +1441,6 @@ class Preprocessor:
                     gx0=gx0,
                     gy0=gy0,
                     path_value=0.35,
-                    end_value=0.65,
                     radius=0,
                 )
 
@@ -1679,10 +1678,9 @@ class Preprocessor:
 
         # 生存奖励
         survive_phase_weight = 1.00 + (self.step_no / 200)
-        survive_reward = 1.00
         if abb_score < self.abb_safe_score:
-            survive_reward = 0.0
             los_break_reward = min(los_break_reward, 0.0)
+        abb_score = _norm(abb_score, self.abb_safe_score)
 
         treasure_dist_reward = self._compute_positive_dist_shaping(
             reward_feats.get("nearest_treasure_dist_norm", -1.0),
@@ -1706,7 +1704,7 @@ class Preprocessor:
 
         reward_vector = [
             0.50 * score_gain,
-            0.03 * survive_phase_weight * survive_reward,
+            0.03 * survive_phase_weight * abb_score,
             0.50 * los_break_reward,
             0.25 * flash_reward,
             0.20 * near_wall_penalty,
