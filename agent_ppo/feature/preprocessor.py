@@ -11,6 +11,7 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 """
 
 import json
+import heapq
 import numpy as np
 from collections import deque
 
@@ -58,6 +59,9 @@ DIR8 = [
 
 # 24 个扫描角：0, 15, 30, ..., 345
 SCAN_ANGLES_DEG = list(range(0, 360, 15))
+
+# 视野外怪物预测：每 N 帧重算一次 A* 路径
+MONSTER_ASTAR_REPLAN_INTERVAL = 4
 
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
@@ -184,6 +188,12 @@ class Preprocessor:
         self.passable_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
         # 第二层：可见性地图：1=已知, 0=未知
         self.visibility_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
+        self.monster_predicted_paths = [[], []]
+        self.monster_replan_counters = [0, 0]
+
+        # 怪物视野外预测位置缓存
+        self.last_seen_monster_pos = [None, None]
+        self.predicted_monster_pos = [None, None]
 
     def update_global_maps(self, hero_x, hero_y, map_info):
         """
@@ -847,6 +857,111 @@ class Preprocessor:
             return None
         return float(dx / norm), float(dz / norm)
 
+    def _astar_next_step_towards(self, start, goal):
+        """
+        在已知可通行区域上，用 A* 从 start 朝 goal 导航。
+        未知区域视作阻碍；若存在路径，返回从 start 出发的下一步位置。
+        """
+        if start is None or goal is None:
+            return None
+
+        sx, sz = int(start[0]), int(start[1])
+        gx, gz = int(goal[0]), int(goal[1])
+
+        if not (0 <= sx < MAP_SIZE_INT and 0 <= sz < MAP_SIZE_INT):
+            return None
+        if not (0 <= gx < MAP_SIZE_INT and 0 <= gz < MAP_SIZE_INT):
+            return None
+        if not self._is_global_passable(sx, sz):
+            return None
+        if not self._is_global_passable(gx, gz):
+            return None
+        if (sx, sz) == (gx, gz):
+            return (sx, sz)
+
+        def heuristic(x, z):
+            return max(abs(x - gx), abs(z - gz))
+
+        open_heap = []
+        heapq.heappush(open_heap, (heuristic(sx, sz), 0.0, (sx, sz)))
+        came_from = {}
+        g_score = {(sx, sz): 0.0}
+        closed = set()
+
+        while open_heap:
+            _, cur_g, cur = heapq.heappop(open_heap)
+            if cur in closed:
+                continue
+            closed.add(cur)
+
+            if cur == (gx, gz):
+                break
+
+            cx, cz = cur
+            for dx, dz in DIR8:
+                nx = cx + dx
+                nz = cz + dz
+                nxt = (nx, nz)
+                if nxt in closed:
+                    continue
+                if not self._is_global_passable(nx, nz):
+                    continue
+
+                step_cost = 1.41421356 if (dx != 0 and dz != 0) else 1.0
+                new_g = cur_g + step_cost
+                if new_g + 1e-6 < g_score.get(nxt, float('inf')):
+                    g_score[nxt] = new_g
+                    came_from[nxt] = cur
+                    heapq.heappush(open_heap, (new_g + heuristic(nx, nz), new_g, nxt))
+
+        if (gx, gz) not in came_from and (gx, gz) != (sx, sz):
+            return None
+
+        cur = (gx, gz)
+        while came_from.get(cur) != (sx, sz):
+            parent = came_from.get(cur)
+            if parent is None:
+                return None
+            cur = parent
+        return cur
+
+    def _update_predicted_monster_pos(self, idx, monster, hero_pos):
+        """
+        视野内：直接用真实位置，并刷新 last_seen。
+        视野外：从上一预测位置/最后可见位置出发，
+        每 N 帧重算一次 A*，中间沿缓存路径每帧走一步。
+        """
+        is_in_view = int(monster.get("is_in_view", 0)) > 0
+
+        if is_in_view and ("pos" in monster) and (monster["pos"] is not None):
+            mx = int(monster["pos"]["x"])
+            mz = int(monster["pos"]["z"])
+            self.last_seen_monster_pos[idx] = (mx, mz)
+            self.predicted_monster_pos[idx] = (mx, mz)
+            self.monster_predicted_paths[idx] = [(mx, mz)]
+            self.monster_replan_counters[idx] = 0
+            return mx, mz
+
+        start_pos = self.predicted_monster_pos[idx]
+        if start_pos is None:
+            start_pos = self.last_seen_monster_pos[idx]
+
+        predicted = self._maybe_replan_monster_path(
+            idx=idx,
+            start_pos=start_pos,
+            hero_pos=(int(hero_pos["x"]), int(hero_pos["z"])),
+        )
+
+        if predicted is not None:
+            self.predicted_monster_pos[idx] = predicted
+            return int(predicted[0]), int(predicted[1])
+
+        est_mx, est_mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], monster)
+        self.predicted_monster_pos[idx] = (int(est_mx), int(est_mz))
+        self.monster_predicted_paths[idx] = [(int(est_mx), int(est_mz))]
+        self.monster_replan_counters[idx] = 0
+        return int(est_mx), int(est_mz)
+
     def _update_organ_memory(self, env_info, organs, hero_pos):
         self.buff_refresh_time = int(env_info.get("buff_refresh_time", self.buff_refresh_time))
         remaining_treasures = {int(x) for x in env_info.get("treasure_id", [])}
@@ -1019,6 +1134,101 @@ class Preprocessor:
         return abb_score, penalty
 
 
+
+    def _astar_path(self, start, goal):
+        """
+        在已知且可通行区域上做 8 邻接 A*。
+        未知区域视作阻碍。
+        返回完整路径 [start, ..., goal]；若失败返回 []。
+        """
+        import heapq
+
+        if start is None or goal is None:
+            return []
+
+        sx, sz = int(start[0]), int(start[1])
+        gx, gz = int(goal[0]), int(goal[1])
+
+        if not (0 <= sx < MAP_SIZE_INT and 0 <= sz < MAP_SIZE_INT):
+            return []
+        if not (0 <= gx < MAP_SIZE_INT and 0 <= gz < MAP_SIZE_INT):
+            return []
+        if not (self.visibility_map[sx, sz] > 0 and self.passable_map[sx, sz] > 0):
+            return []
+        if not (self.visibility_map[gx, gz] > 0 and self.passable_map[gx, gz] > 0):
+            return []
+
+        def heuristic(x, z):
+            return float(np.hypot(x - gx, z - gz))
+
+        open_heap = []
+        heapq.heappush(open_heap, (heuristic(sx, sz), 0.0, (sx, sz)))
+        came_from = {}
+        g_score = {(sx, sz): 0.0}
+        visited = set()
+
+        while open_heap:
+            _, cur_g, (x, z) = heapq.heappop(open_heap)
+            if (x, z) in visited:
+                continue
+            visited.add((x, z))
+
+            if (x, z) == (gx, gz):
+                path = [(x, z)]
+                while (x, z) in came_from:
+                    x, z = came_from[(x, z)]
+                    path.append((x, z))
+                path.reverse()
+                return path
+
+            for dx, dz in DIR8:
+                nx, nz = x + dx, z + dz
+                if not (0 <= nx < MAP_SIZE_INT and 0 <= nz < MAP_SIZE_INT):
+                    continue
+                if not (self.visibility_map[nx, nz] > 0 and self.passable_map[nx, nz] > 0):
+                    continue
+
+                step_cost = 1.41421356 if (dx != 0 and dz != 0) else 1.0
+                ng = cur_g + step_cost
+                if ng + 1e-6 >= g_score.get((nx, nz), float('inf')):
+                    continue
+                g_score[(nx, nz)] = ng
+                came_from[(nx, nz)] = (x, z)
+                heapq.heappush(open_heap, (ng + heuristic(nx, nz), ng, (nx, nz)))
+
+        return []
+
+    def _maybe_replan_monster_path(self, idx, start_pos, hero_pos):
+        """
+        每 N 帧重算一次 A*；中间沿已有路径前进一步。
+        """
+        if start_pos is None or hero_pos is None:
+            self.monster_predicted_paths[idx] = []
+            self.monster_replan_counters[idx] = 0
+            return None
+
+        need_replan = (
+            len(self.monster_predicted_paths[idx]) <= 1 or
+            self.monster_replan_counters[idx] <= 0
+        )
+
+        if need_replan:
+            path = self._astar_path(start_pos, hero_pos)
+            self.monster_predicted_paths[idx] = path if path else [start_pos]
+            self.monster_replan_counters[idx] = max(1, int(MONSTER_ASTAR_REPLAN_INTERVAL))
+
+        path = self.monster_predicted_paths[idx]
+        cur_pos = path[0] if path else start_pos
+
+        if len(path) > 1:
+            cur_pos = path[1]
+            self.monster_predicted_paths[idx] = path[1:]
+        else:
+            self.monster_predicted_paths[idx] = [cur_pos]
+
+        self.monster_replan_counters[idx] -= 1
+        return cur_pos
+
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
 
@@ -1050,45 +1260,51 @@ class Preprocessor:
         monsters = frame_state.get("monsters", [])
         monster_feats = []
 
+        monster_reappeared = [False, False]
         for i in range(2):
             if i < len(monsters):
                 m = monsters[i]
 
-                # 视野外时，hero_relative_direction 和 hero_l2_distance 仍然可用
+                pred_pos = self._update_predicted_monster_pos(i, m, hero_pos)
+
                 is_in_view = float(m.get("is_in_view", 0))
+                prev_invisible = self.last_monster_invisible_1 if i == 0 else self.last_monster_invisible_2
+                monster_reappeared[i] = bool(is_in_view > 0.5 and prev_invisible)
+
                 m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED) if is_in_view else 0.0
 
                 rel_x = 0.0
                 rel_z = 0.0
-
-                # 先给默认值：视野外时只保留粗信息
-                dir_idx = int(m.get("hero_relative_direction", 0))
-                dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
-
+                dir_x = 0.0
+                dir_z = 0.0
                 dist_norm = _norm(m.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET)
 
                 if is_in_view:
                     m_pos = m["pos"]
                     dx = float(m_pos["x"] - hero_pos["x"])
                     dz = float(m_pos["z"] - hero_pos["z"])
-
-                    # 精细相对位置：保留正负号
                     rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
                     rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
 
                     raw_dist = np.sqrt(dx * dx + dz * dz)
                     dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 10)
-
-                    # 视野内时，用连续方向覆盖离散方向
                     if raw_dist > 1e-6:
                         dir_x = dx / raw_dist
                         dir_z = dz / raw_dist
                 else:
-                    est_mx, est_mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
+                    if pred_pos is None:
+                        est_mx, est_mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
+                    else:
+                        est_mx, est_mz = pred_pos
                     dx = float(est_mx - hero_pos["x"])
                     dz = float(est_mz - hero_pos["z"])
                     rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
                     rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
+                    raw_dist = np.sqrt(dx * dx + dz * dz)
+                    dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 10)
+                    if raw_dist > 1e-6:
+                        dir_x = dx / raw_dist
+                        dir_z = dz / raw_dist
 
                 monster_feats.append(
                     np.array(
@@ -1097,6 +1313,7 @@ class Preprocessor:
                     )
                 )
             else:
+                monster_reappeared[i] = False
                 monster_feats.append(np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32))
 
         organs = frame_state.get("organs", [])
@@ -1135,8 +1352,14 @@ class Preprocessor:
         # 规则：
         # - 视野内：用精确位置
         # - 视野外但怪物存在：用粗方向 + 桶距离估计位置
-        for m in monsters[:2]:
-            mx, mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
+        for i, m in enumerate(monsters[:2]):
+            if int(m.get("is_in_view", 0)) > 0 and ("pos" in m) and (m["pos"] is not None):
+                mx = int(m["pos"]["x"])
+                mz = int(m["pos"]["z"])
+            elif self.predicted_monster_pos[i] is not None:
+                mx, mz = self.predicted_monster_pos[i]
+            else:
+                mx, mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
 
             if not (0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT):
                 continue
@@ -1248,6 +1471,7 @@ class Preprocessor:
             "is_dangerous": bool(boundary_cluster_info["is_dangerous"]),
             "nearest_treasure_dist_norm": float(nearest_treasure_dist_norm),
             "nearest_buff_dist_norm": float(nearest_buff_dist_norm),
+            "monster_reappeared": monster_reappeared,
         }
 
         self.pos_history.append((int(hero_pos["x"]), int(hero_pos["z"])))
@@ -1279,14 +1503,20 @@ class Preprocessor:
         r1 = 0.0
         r2 = 0.0
 
+        monster_reappeared = reward_feats.get("monster_reappeared", [False, False])
+
         # monster 1
-        if self.last_monster_dist_norm_1 >= 0:
+        if monster_reappeared[0]:
+            r1 = 0.0
+        elif self.last_monster_dist_norm_1 >= 0:
             cur_dist_1 = float(m1[4])   # dist_norm
             r1 = cur_dist_1 - self.last_monster_dist_norm_1
 
         # monster 2
         if second_exists:
-            if self.last_monster_dist_norm_2 >= 0:
+            if monster_reappeared[1]:
+                r2 = 0.0
+            elif self.last_monster_dist_norm_2 >= 0:
                 cur_dist_2 = float(m2[4])   # dist_norm
                 r2 = cur_dist_2 - self.last_monster_dist_norm_2
 
@@ -1394,11 +1624,11 @@ class Preprocessor:
             0.50 * los_break_reward,
             0.25 * flash_reward,
             0.20 * near_wall_penalty,
-            0.20 * abb_penalty,
+            0.50 * abb_penalty,
             0.10 * exploration_rate * explore_reward,
             0.30 * danger_penalty,
             0.30 * dist_shaping_norm_weight * treasure_dist_reward,
             0.30 * dist_shaping_norm_weight * buff_dist_reward,
         ]
 
-        return reward_vector, sum(reward_vector)
+        return reward_vector, sum(reward_vector[:2]) + sum(reward_vector[3:]) + 3.50 * dist_shaping_norm_weight * monster_dist_reward
