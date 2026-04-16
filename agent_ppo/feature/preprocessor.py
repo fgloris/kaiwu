@@ -819,59 +819,85 @@ class Preprocessor:
         return float(dx / norm), float(dz / norm)
 
     def _update_organ_memory(self, env_info, organs, hero_pos):
-        self.buff_refresh_time = int(env_info.get("buff_refresh_time", self.buff_refresh_time))
-        remaining_treasures = {int(x) for x in env_info.get("treasure_id", [])}
+        """
+        organ memory 更新规则：
 
+        1. 当前 organs 里出现的新 id：
+        - 加入 memory
+        - available = status
+        - buff 的 respawn_step = -1
+
+        2. 当前 organs 里出现的旧 id：
+        - 刷新位置
+        - available = status
+        - buff 的 respawn_step = -1
+
+        3. 对所有 memory 中“位置在当前 21x21 视野内，但本帧没出现在 organs 里”的物体：
+        - 若 available 原本为 True，则置 False
+        - 若是 buff，同时写 respawn_step = step_no + buff_refresh_time
+
+        4. 对所有 buff：
+        - 若 respawn_step 到时，则 available = True, respawn_step = -1
+        """
+        self.buff_refresh_time = int(env_info.get("buff_refresh_time", self.buff_refresh_time))
+
+        # 当前帧在视野内真正出现过的 id
+        visible_treasure_ids = set()
+        visible_buff_ids = set()
+
+        # 1) 先处理当前 organs：出现了就记为 available=True
         for organ in organs:
             config_id = int(organ.get("config_id", -1))
             if config_id < 0:
                 continue
-            sub_type = int(organ.get("sub_type", 0))
+
+            sub_type = int(organ.get("sub_type", 0))  # 1=treasure, 2=buff
             pos = organ.get("pos", {}) or {}
             x = int(pos.get("x", 0))
             z = int(pos.get("z", 0))
-            status = int(organ.get("status", 0))
+            available = bool(organ.get("status", 1) == 1)
 
             if sub_type == 1:
-                mem = self.treasure_memory.setdefault(config_id, {"pos": (x, z), "available": False})
-                mem["pos"] = (x, z)
-                mem["available"] = config_id in remaining_treasures
-            elif sub_type == 2:
-                mem = self.buff_memory.setdefault(
+                visible_treasure_ids.add(config_id)
+
+                mem = self.treasure_memory.setdefault(
                     config_id,
-                    {"pos": (x, z), "available": False, "respawn_step": -1},
+                    {"pos": (x, z), "available": available}
                 )
                 mem["pos"] = (x, z)
-                if status == 1:
-                    mem["available"] = True
-                    mem["respawn_step"] = -1
-                else:
-                    mem["available"] = False
-                    if mem.get("respawn_step", -1) < 0:
-                        mem["respawn_step"] = self.step_no + self.buff_refresh_time
+                mem["available"] = available
 
-        for config_id, mem in self.treasure_memory.items():
-            mem["available"] = config_id in remaining_treasures
+            elif sub_type == 2:
+                visible_buff_ids.add(config_id)
 
-        collected_buff = int(env_info.get("collected_buff", self.last_collected_buff))
-        buff_delta = max(0, collected_buff - self.last_collected_buff)
-        if buff_delta > 0 and self.buff_memory:
-            hero_x = int(hero_pos["x"])
-            hero_z = int(hero_pos["z"])
-            candidates = []
-            for bid, mem in self.buff_memory.items():
-                if not mem.get("available", False):
-                    continue
-                bx, bz = mem["pos"]
-                dist = float(np.hypot(bx - hero_x, bz - hero_z))
-                candidates.append((dist, bid))
-            candidates.sort()
-            for _, bid in candidates[:buff_delta]:
-                self.buff_memory[bid]["available"] = False
-                self.buff_memory[bid]["respawn_step"] = self.step_no + self.buff_refresh_time
+                mem = self.buff_memory.setdefault(
+                    config_id,
+                    {"pos": (x, z), "available": True, "respawn_step": -1}
+                )
+                mem["pos"] = (x, z)
+                mem["available"] = available
+                mem["respawn_step"] = -1
 
-        self.last_collected_buff = collected_buff
+        # 2) treasure: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable
+        for tid, mem in self.treasure_memory.items():
+            if not self._is_in_current_view(mem["pos"], hero_pos):
+                continue
+            if tid in visible_treasure_ids:
+                continue
+            if mem.get("available", False):
+                mem["available"] = False
 
+        # 3) buff: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable，并启动 respawn
+        for bid, mem in self.buff_memory.items():
+            if not self._is_in_current_view(mem["pos"], hero_pos):
+                continue
+            if bid in visible_buff_ids:
+                continue
+            if mem.get("available", False):
+                mem["available"] = False
+                mem["respawn_step"] = self.step_no + self.buff_refresh_time
+
+        # 4) buff 到刷新时间则重新可用
         for mem in self.buff_memory.values():
             respawn_step = int(mem.get("respawn_step", -1))
             if respawn_step >= 0 and self.step_no >= respawn_step:
@@ -899,10 +925,8 @@ class Preprocessor:
                 "dist": dist,
                 "dist_norm": _norm(dist, MAP_SIZE * 1.41),
                 "feat": np.array([
-                    float(np.clip(dx / MAP_SIZE, -1.0, 1.0)),
-                    float(np.clip(dz / MAP_SIZE, -1.0, 1.0)),
-                    float(dir_x),
-                    float(dir_z),
+                    np.clip(dir_x, -1.0, 1.0),
+                    np.clip(dir_z, -1.0, 1.0),
                     _norm(dist, MAP_SIZE * 1.41),
                     1.0 if available else 0.0,
                 ], dtype=np.float32),
@@ -914,7 +938,7 @@ class Preprocessor:
         for item in items[:topk]:
             feat_list.append(item["feat"])
         while len(feat_list) < topk:
-            feat_list.append(np.zeros(6, dtype=np.float32))
+            feat_list.append(np.zeros(4, dtype=np.float32))
 
         best_dist_norm = -1.0
         for item in items:
@@ -988,7 +1012,6 @@ class Preprocessor:
         buff_remain_norm = _norm(hero["buff_remaining_time"], MAX_BUFF_DURATION)
 
         hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
-        history_pos_feat = self._build_history_position_feat(hero_pos)
 
         # 怪物特征
         monsters = frame_state.get("monsters", [])
