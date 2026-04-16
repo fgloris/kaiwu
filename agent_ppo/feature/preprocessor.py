@@ -22,11 +22,11 @@ LOCAL_MAP_HALF = 10
 VIEW_MAP_SIZE = 21
 
 # Max monster speed / 最大怪物速度
-MAX_MONSTER_SPEED = 5.0
+MAX_MONSTER_SPEED = 2.0
 # Max distance bucket / 距离桶最大值
 MAX_DIST_BUCKET = 5.0
 # Max flash cooldown / 最大闪现冷却步数
-MAX_FLASH_CD = 2000.0
+MAX_FLASH_CD = 200.0
 # Max buff duration / buff最大持续时间
 MAX_BUFF_DURATION = 50.0
 
@@ -148,11 +148,43 @@ def _paint_square(mask, center_i, center_j, radius=1, value=1.0):
             if 0 <= ii < h and 0 <= jj < w:
                 mask[ii, jj] = value
 
+def _paint_recent_positions_on_passable(layer, positions, gx0, gy0):
+    """
+    将最近若干帧自身轨迹画到 passable layer 上。
+    采用递增强度，越新的位置越明显。
+    """
+    if positions is None:
+        return
+
+    positions = list(positions)
+    if not positions:
+        return
+
+    total = len(positions)
+    h, w = layer.shape
+    for idx, (px, pz) in enumerate(positions):
+        li = int(px - gx0)
+        lj = int(pz - gy0)
+        if not (0 <= li < h and 0 <= lj < w):
+            continue
+        # 仅在可通行位置上覆盖，避免把障碍误画亮
+        if layer[li, lj] <= 0.0:
+            continue
+        if total == 1:
+            value = 0.6
+        else:
+            value = 0.8 - 0.6 * (idx / float(total - 1))
+        layer[li, lj] = value
+
 class Preprocessor:
     def __init__(self, logger=None):
         self.logger = logger
         self.total_train_steps = 0
         self.reset()
+
+    def set_curriculum_episode(self, episode_cnt):
+        """Set current training episode for stage-aware curriculum and rewards."""
+        self.curriculum_episode = int(max(0, episode_cnt))
 
     def reset(self):
         self.step_no = 0
@@ -763,67 +795,6 @@ class Preprocessor:
             "masked_local_passable": np.array(local_passable, copy=True),
         }
 
-    def _select_reachable_opposite_boundary_cluster(self, connected_clusters, monster_feat, angle_cos_threshold=0.0):
-        """
-        从所有“能到达”的 boundary clusters（即 connected_clusters）中，
-        选择一个与“怪物方向相反”最一致的 cluster。
-
-        monster_feat: [is_in_view, speed, rel_x, rel_z, dist_norm, dir_x, dir_z]
-        返回：
-            {
-                "center": (cx, cy),
-                "size": size,
-                "dist": agent 到该 cluster center 的局部距离,
-                "align": 与“远离怪物方向”的余弦相似度,
-            }
-            或 None
-        """
-        if not connected_clusters:
-            return None
-
-        mdx = float(monster_feat[5])
-        mdz = float(monster_feat[6])
-        mnorm = float(np.hypot(mdx, mdz))
-        if mnorm <= 1e-6:
-            return None
-
-        # 远离怪物方向 = -(hero->monster)
-        away_x = -mdx / mnorm
-        away_z = -mdz / mnorm
-
-        agent_x = float(LOCAL_MAP_HALF)
-        agent_y = float(LOCAL_MAP_HALF)
-
-        best = None
-        best_align = -1e9
-
-        for c in connected_clusters:
-            cx, cy = c["center"]
-            vx = float(cx - agent_x)
-            vy = float(cy - agent_y)
-            dist = float(np.hypot(vx, vy))
-            if dist <= 1e-6:
-                continue
-
-            uvx = vx / dist
-            uvy = vy / dist
-            align = float(uvx * away_x + uvy * away_z)
-
-            if align > best_align:
-                best_align = align
-                best = {
-                    "center": (float(cx), float(cy)),
-                    "size": int(c["size"]),
-                    "dist": float(dist),
-                    "align": float(align),
-                }
-
-        if best is None:
-            return None
-        if best["align"] < angle_cos_threshold:
-            return None
-        return best
-
     def _action_to_dir_vec(self, action_idx):
         """
         将动作索引映射成 8 方向单位向量。
@@ -964,33 +935,6 @@ class Preprocessor:
         setattr(self, last_attr_name, float(cur_dist_norm))
         return reward
 
-    def _build_history_position_feat(self, hero_pos):
-        cur_x = int(hero_pos["x"])
-        cur_z = int(hero_pos["z"])
-
-        history = list(self.pos_history)
-
-        if len(history) >= 4:
-            p4_x, p4_z = history[-4]
-        elif len(history) > 0:
-            p4_x, p4_z = history[0]
-        else:
-            p4_x, p4_z = cur_x, cur_z
-
-        if len(history) >= 8:
-            p8_x, p8_z = history[-8]
-        elif len(history) > 0:
-            p8_x, p8_z = history[0]
-        else:
-            p8_x, p8_z = cur_x, cur_z
-
-        return np.array([
-            _norm(p4_x, MAP_SIZE),
-            _norm(p4_z, MAP_SIZE),
-            _norm(p8_x, MAP_SIZE),
-            _norm(p8_z, MAP_SIZE),
-        ], dtype=np.float32)
-
     def _compute_abb_score(self, cur_hero_pos):
         """
         abb_score = d(p0,p-1)/1 + d(p0,p-2)/2 + ... + d(p0,p-8)/8
@@ -1127,9 +1071,6 @@ class Preprocessor:
                 gy = gy0 + j
                 if 0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT:
                     map_feat[0, i, j] = float(self.passable_map[gx, gy])
-        
-        # _log_gray_map_as_binary(self.logger, map_feat[0], title=f"map:{self.step_no}")
-        # _log_gray_map_as_binary(self.logger, map_feat[1], title=f"vis:{self.step_no}")
 
         # 第二层：monster mask
         # 规则：
@@ -1156,6 +1097,8 @@ class Preprocessor:
                 continue
             if self.visibility_map[ox, oz] == 0:
                 continue
+            if not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
+                continue
 
             center_i = ox - gx0
             center_j = oz - gy0
@@ -1171,15 +1114,6 @@ class Preprocessor:
             hero_pos["z"],
             return_debug=False,
         )
-
-        # _log_passable_map_and_ray_collision(
-        #     self.logger,
-        #     map_feat[0],
-        #     global_rays,
-        #     ray_collision_feat,
-        #     step_no=self.step_no,
-        #     title="ray_collision_debug",
-        # )
 
         # 合法动作特征 + 合法动作掩码
         raw_legal_action = self._parse_legal_action_raw(legal_act_raw)
@@ -1223,7 +1157,6 @@ class Preprocessor:
         vector_feat = np.concatenate(
             [
                 hero_feat,
-                history_pos_feat,
                 monster_feats[0],
                 monster_feats[1],
                 ray_collision_feat,
