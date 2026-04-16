@@ -1126,7 +1126,7 @@ class Preprocessor:
         for item in items[:topk]:
             feat_list.append(item["feat"])
         while len(feat_list) < topk:
-            feat_list.append(np.zeros(6, dtype=np.float32))
+            feat_list.append(np.zeros(4, dtype=np.float32))
 
         best_dist_norm = -1.0
         for item in items:
