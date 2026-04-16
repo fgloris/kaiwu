@@ -1105,6 +1105,8 @@ class Preprocessor:
             x, z = mem["pos"]
             dx = float(x - hero_x)
             dz = float(z - hero_z)
+            dir_x = dx / dist if dist > 1e-6 else 0.0
+            dir_z = dz / dist if dist > 1e-6 else 0.0
             dist = float(np.hypot(dx, dz))
             items.append({
                 "id": int(obj_id),
@@ -1113,8 +1115,8 @@ class Preprocessor:
                 "dist": dist,
                 "dist_norm": _norm(dist, MAP_SIZE * 1.41),
                 "feat": np.array([
-                    float(np.clip(dx / MAP_SIZE, -1.0, 1.0)),
-                    float(np.clip(dz / MAP_SIZE, -1.0, 1.0)),
+                    np.clip(dir_x, -1.0, 1.0),
+                    np.clip(dir_z, -1.0, 1.0),
                     _norm(dist, MAP_SIZE * 1.41),
                     1.0 if available else 0.0,
                 ], dtype=np.float32),
