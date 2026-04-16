@@ -58,6 +58,12 @@ class Algorithm:
         old_value = torch.stack([f.value for f in list_sample_data]).to(self.device)
         reward_sum = torch.stack([f.reward_sum for f in list_sample_data]).to(self.device)
 
+        advantage = (advantage - advantage.mean()) / advantage.std().clamp_min(1e-8)
+        #reward_sum_mean = reward_sum.mean()
+        #reward_sum_std = reward_sum.std().clamp_min(1e-8)
+        #reward_sum = (reward_sum - reward_sum_mean) / reward_sum_std
+        #old_value = (old_value - reward_sum_mean) / reward_sum_std
+
         self.model.set_train_mode()
         self.optimizer.zero_grad()
 
