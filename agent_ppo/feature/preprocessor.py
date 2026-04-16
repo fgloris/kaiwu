@@ -173,7 +173,7 @@ def _paint_path(layer, path, gx0, gy0, path_value=0.35, radius=0):
         if not (0 <= li < h and 0 <= lj < w):
             continue
 
-        value = path_value * ()
+        value = path_value * (1.2 - _norm(idx, MAP_SIZE))
         if radius <= 0:
             layer[li, lj] = value
         else:
