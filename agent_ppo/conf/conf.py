@@ -19,16 +19,16 @@ class Config:
         7,   # monster2
         8,   # ray collision
         8,   # boundery cluster
-        12,  # nearest 2 treasures
-        12,  # 2 buffs
+        6,  # nearest 2 treasures
+        6,  # 2 buffs
         16,  # legal action mask
         4,   # progress
-        2,   # situation
+        3,   # situation
     ]
     VECTOR_FEATURE_LEN = sum(VECTOR_FEATURES)
 
     # 局部地图大小：完整 21x21
-    MAP_CHANNEL = 3
+    MAP_CHANNEL = 4
     MAP_SIZE = 21
 
     # 兼容 SampleData 里的 obs 维度定义
