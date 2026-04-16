@@ -155,6 +155,7 @@ def build_monitor():
             type="line",
         )
         .add_metric(metrics_name="monster_prediction_error_avg", expr="avg(monster_prediction_error_avg{})")
+        .add_metric(metrics_name="monster_prediction_fallback_avg", expr="avg(monster_prediction_fallback_avg{})")
         .end_panel()
         .end_group()
         .build()

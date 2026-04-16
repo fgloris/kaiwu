@@ -253,10 +253,14 @@ class Preprocessor:
 
         # 怪物视野外预测位置缓存
         self.last_seen_monster_pos = [None, None]
+        self.last_seen_monster_speed = [1, 1]
         self.predicted_monster_pos = [None, None]
         self.monster_prediction_error_sum = 0.0
         self.monster_prediction_error_count = 0
         self.monster_prediction_error_avg = 0.0
+        self.monster_offview_predict_count = 0
+        self.monster_fallback_count = 0
+        self.monster_fallback_rate = 0.0
 
     def update_global_maps(self, hero_x, hero_y, map_info):
         """
@@ -931,10 +935,13 @@ class Preprocessor:
         """
         视野内：
         - 直接使用真实位置
+        - 记录最近一次视野内观测到的速度
         - 每帧基于真实位置到 hero 重新计算一次 A* 路径，并缓存到 monster layer
         视野外：
         - 从上一预测位置/最后可见位置出发
         - 每 N 帧重算一次 A*，中间沿缓存路径每帧推进若干步
+        - 视野外优先使用最近一次视野内观测到的速度作为先验速度
+        - 若 A* 失败，则 fallback 到方向桶+距离桶粗估
         """
         is_in_view = int(monster.get("is_in_view", 0)) > 0
         hero_xy = (int(hero_pos["x"]), int(hero_pos["z"]))
@@ -942,6 +949,7 @@ class Preprocessor:
         if is_in_view and ("pos" in monster) and (monster["pos"] is not None):
             mx = int(monster["pos"]["x"])
             mz = int(monster["pos"]["z"])
+            self.last_seen_monster_speed[idx] = max(1, int(monster.get("speed", 1)))
             self.last_seen_monster_pos[idx] = (mx, mz)
             self.predicted_monster_pos[idx] = (mx, mz)
 
@@ -954,7 +962,8 @@ class Preprocessor:
         if start_pos is None:
             start_pos = self.last_seen_monster_pos[idx]
 
-        step_count = monster.get("speed", 1)
+        step_count = max(1, int(self.last_seen_monster_speed[idx]))
+        self.monster_offview_predict_count += 1
 
         predicted = self._maybe_replan_monster_path(
             idx=idx,
@@ -965,7 +974,11 @@ class Preprocessor:
 
         if predicted is not None:
             self.predicted_monster_pos[idx] = predicted
+            self.monster_fallback_rate = self.monster_fallback_count / max(1, self.monster_offview_predict_count)
             return int(predicted[0]), int(predicted[1])
+
+        self.monster_fallback_count += 1
+        self.monster_fallback_rate = self.monster_fallback_count / max(1, self.monster_offview_predict_count)
 
         est_mx, est_mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], monster)
         self.predicted_monster_pos[idx] = (int(est_mx), int(est_mz))
@@ -1345,7 +1358,10 @@ class Preprocessor:
                     self.monster_prediction_error_count += 1
                     self.monster_prediction_error_avg = self.monster_prediction_error_sum / max(1, self.monster_prediction_error_count)
 
-                m_speed_norm = _norm(m.get("speed", 1), 2) if is_in_view else 0.0
+                if is_in_view:
+                    m_speed_norm = _norm(m.get("speed", 1), 2)
+                else:
+                    m_speed_norm = _norm(self.last_seen_monster_speed[i], 2)
 
                 rel_x = 0.0
                 rel_z = 0.0
@@ -1555,6 +1571,7 @@ class Preprocessor:
             "nearest_treasure_dist_norm": float(nearest_treasure_dist_norm),
             "nearest_buff_dist_norm": float(nearest_buff_dist_norm),
             "monster_reappeared": monster_reappeared,
+            "monster_fallback_rate": float(self.monster_fallback_rate),
         }
 
         self.pos_history.append((int(hero_pos["x"]), int(hero_pos["z"])))
@@ -1721,6 +1738,7 @@ class Preprocessor:
             survival_weight * buff_pick_reward,
             abs(1.50 * dist_shaping_norm_weight * monster_dist_reward),
             self.monster_prediction_error_avg,
+            reward_feats["monster_fallback_rate"],
         ]
 
-        return reward_vector, sum(reward_vector[:-2]) + 1.50 * dist_shaping_norm_weight * monster_dist_reward
+        return reward_vector, sum(reward_vector[:-3]) + 1.50 * dist_shaping_norm_weight * monster_dist_reward
