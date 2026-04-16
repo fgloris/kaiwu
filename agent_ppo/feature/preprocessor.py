@@ -978,6 +978,7 @@ class Preprocessor:
             return int(predicted[0]), int(predicted[1])
 
         self.monster_fallback_count += 1
+        self.logger.warn("monster prediction fallback!")
         self.monster_fallback_rate = self.monster_fallback_count / max(1, self.monster_offview_predict_count)
 
         est_mx, est_mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], monster)
