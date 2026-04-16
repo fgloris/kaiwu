@@ -1034,60 +1034,96 @@ class Preprocessor:
         self.monster_replan_counters[idx] = 0
         return int(est_mx), int(est_mz)
 
-    def _update_organ_memory(self, env_info, organs, hero_pos):
-        self.buff_refresh_time = int(env_info.get("buff_refresh_time", self.buff_refresh_time))
-        remaining_treasures = {int(x) for x in env_info.get("treasure_id", [])}
+    def _is_in_current_view(self, obj_pos, hero_pos):
+        """
+        判断某个全局坐标是否落在当前 hero 为中心的 21x21 视野内。
+        视野范围：x/z 各自相对 hero 在 [-10, 10] 内。
+        """
+        x, z = int(obj_pos[0]), int(obj_pos[1])
+        hero_x = int(hero_pos["x"])
+        hero_z = int(hero_pos["z"])
+        return abs(x - hero_x) <= LOCAL_MAP_HALF and abs(z - hero_z) <= LOCAL_MAP_HALF
 
+    def _update_organ_memory(self, env_info, organs, hero_pos):
+        """
+        organ memory 更新规则：
+
+        1. 当前 organs 里出现的新 id：
+        - 加入 memory
+        - available = status
+        - buff 的 respawn_step = -1
+
+        2. 当前 organs 里出现的旧 id：
+        - 刷新位置
+        - available = status
+        - buff 的 respawn_step = -1
+
+        3. 对所有 memory 中“位置在当前 21x21 视野内，但本帧没出现在 organs 里”的物体：
+        - 若 available 原本为 True，则置 False
+        - 若是 buff，同时写 respawn_step = step_no + buff_refresh_time
+
+        4. 对所有 buff：
+        - 若 respawn_step 到时，则 available = True, respawn_step = -1
+        """
+        self.buff_refresh_time = int(env_info.get("buff_refresh_time", self.buff_refresh_time))
+
+        # 当前帧在视野内真正出现过的 id
+        visible_treasure_ids = set()
+        visible_buff_ids = set()
+
+        # 1) 先处理当前 organs：出现了就记为 available=True
         for organ in organs:
             config_id = int(organ.get("config_id", -1))
             if config_id < 0:
                 continue
-            sub_type = int(organ.get("sub_type", 0))
+
+            sub_type = int(organ.get("sub_type", 0))  # 1=treasure, 2=buff
             pos = organ.get("pos", {}) or {}
             x = int(pos.get("x", 0))
             z = int(pos.get("z", 0))
-            status = int(organ.get("status", 0))
+            available = bool(organ.get("status", 1) == 1)
 
             if sub_type == 1:
-                mem = self.treasure_memory.setdefault(config_id, {"pos": (x, z), "available": False})
-                mem["pos"] = (x, z)
-                mem["available"] = config_id in remaining_treasures
-            elif sub_type == 2:
-                mem = self.buff_memory.setdefault(
+                visible_treasure_ids.add(config_id)
+
+                mem = self.treasure_memory.setdefault(
                     config_id,
-                    {"pos": (x, z), "available": False, "respawn_step": -1},
+                    {"pos": (x, z), "available": available}
                 )
                 mem["pos"] = (x, z)
-                if status == 1:
-                    mem["available"] = True
-                    mem["respawn_step"] = -1
-                else:
-                    mem["available"] = False
-                    if mem.get("respawn_step", -1) < 0:
-                        mem["respawn_step"] = self.step_no + self.buff_refresh_time
+                mem["available"] = available
 
-        for config_id, mem in self.treasure_memory.items():
-            mem["available"] = config_id in remaining_treasures
+            elif sub_type == 2:
+                visible_buff_ids.add(config_id)
 
-        collected_buff = int(env_info.get("collected_buff", self.last_collected_buff))
-        buff_delta = max(0, collected_buff - self.last_collected_buff)
-        if buff_delta > 0 and self.buff_memory:
-            hero_x = int(hero_pos["x"])
-            hero_z = int(hero_pos["z"])
-            candidates = []
-            for bid, mem in self.buff_memory.items():
-                if not mem.get("available", False):
-                    continue
-                bx, bz = mem["pos"]
-                dist = float(np.hypot(bx - hero_x, bz - hero_z))
-                candidates.append((dist, bid))
-            candidates.sort()
-            for _, bid in candidates[:buff_delta]:
-                self.buff_memory[bid]["available"] = False
-                self.buff_memory[bid]["respawn_step"] = self.step_no + self.buff_refresh_time
+                mem = self.buff_memory.setdefault(
+                    config_id,
+                    {"pos": (x, z), "available": True, "respawn_step": -1}
+                )
+                mem["pos"] = (x, z)
+                mem["available"] = available
+                mem["respawn_step"] = -1
 
-        self.last_collected_buff = collected_buff
+        # 2) treasure: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable
+        for tid, mem in self.treasure_memory.items():
+            if not self._is_in_current_view(mem["pos"], hero_pos):
+                continue
+            if tid in visible_treasure_ids:
+                continue
+            if mem.get("available", False):
+                mem["available"] = False
 
+        # 3) buff: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable，并启动 respawn
+        for bid, mem in self.buff_memory.items():
+            if not self._is_in_current_view(mem["pos"], hero_pos):
+                continue
+            if bid in visible_buff_ids:
+                continue
+            if mem.get("available", False):
+                mem["available"] = False
+                mem["respawn_step"] = self.step_no + self.buff_refresh_time
+
+        # 4) buff 到刷新时间则重新可用
         for mem in self.buff_memory.values():
             respawn_step = int(mem.get("respawn_step", -1))
             if respawn_step >= 0 and self.step_no >= respawn_step:
@@ -1105,9 +1141,9 @@ class Preprocessor:
             x, z = mem["pos"]
             dx = float(x - hero_x)
             dz = float(z - hero_z)
+            dist = float(np.hypot(dx, dz))
             dir_x = dx / dist if dist > 1e-6 else 0.0
             dir_z = dz / dist if dist > 1e-6 else 0.0
-            dist = float(np.hypot(dx, dz))
             items.append({
                 "id": int(obj_id),
                 "pos": (int(x), int(z)),
@@ -1310,7 +1346,6 @@ class Preprocessor:
         env_info = observation["env_info"]
         map_info = observation["map_info"]
         legal_act_raw = observation["legal_action"]
-        self.logger.warning(f"legal_action: {legal_act_raw}")
 
         self.step_no = observation["step_no"]
         self.max_step = env_info.get("max_step", 200)
@@ -1397,7 +1432,11 @@ class Preprocessor:
                 monster_reappeared[i] = False
                 monster_feats.append(np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32))
 
+        # organ 特征
         organs = frame_state.get("organs", [])
+        if len(organs) > 0:
+            if int(organs[0].get("status", 0)) != 1:
+                self.logger.warning(f"organs: {organs}")
         self._update_organ_memory(env_info, organs, hero_pos)
         treasure_feat, treasure_items, nearest_treasure_dist_norm = self._build_target_features(
             hero_pos, self.treasure_memory, topk=2, prefer_available_only=True
@@ -1434,9 +1473,6 @@ class Preprocessor:
             gx0=gx0,
             gy0=gy0,
         )
-        
-        # _log_gray_map_as_binary(self.logger, map_feat[0], title=f"map:{self.step_no}")
-        # _log_gray_map_as_binary(self.logger, map_feat[1], title=f"vis:{self.step_no}")
 
         # 第二层：monster layer
         # - 先把怪物追击 hero 的 A* 路径画出来
@@ -1494,15 +1530,6 @@ class Preprocessor:
             hero_pos["z"],
             return_debug=False,
         )
-
-        # _log_passable_map_and_ray_collision(
-        #     self.logger,
-        #     map_feat[0],
-        #     global_rays,
-        #     ray_collision_feat,
-        #     step_no=self.step_no,
-        #     title="ray_collision_debug",
-        # )
 
         # 合法动作特征 + 合法动作掩码
         raw_legal_action = self._parse_legal_action_raw(legal_act_raw)
