@@ -199,6 +199,7 @@ class EpisodeRunner:
                 "r_treasure_dist_sum",
                 "r_buff_dist_sum",
                 "r_monster_dist_sum",
+                "r_buff_pick_sum",
                 "monster_prediction_error_avg"
             ]
             episode_reward_vec_sum = np.zeros(len(reward_vec_keys), dtype=np.float32)

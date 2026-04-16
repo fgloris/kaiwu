@@ -1561,7 +1561,6 @@ class Preprocessor:
             "monster_feats_available": len(monsters),
             "progress_feats": progress_feat,
             "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
-            "last_action": int(last_action),
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
             "connected_opening_count": int(boundary_cluster_info["connected_opening_count"]),
             "is_dangerous": bool(boundary_cluster_info["is_dangerous"]),
@@ -1588,7 +1587,6 @@ class Preprocessor:
         self.last_total_score = cur_total_score
         
         # 怪物 dist shaping
-        
         second_exists = bool(reward_feats['progress_feats'][2] < 1e-6)
 
         monster_dist_reward = 0.0
@@ -1698,7 +1696,15 @@ class Preprocessor:
             "last_buff_dist_norm",
         )
 
-        # final step reward vector
+        # buff 奖励
+        monster_goingto_speedup = bool(reward_feats['progress_feats'][3] < 100)
+
+        collected_buff = int(env_info.get("collected_buff", self.last_collected_buff))
+        buff_delta = float(max(0, collected_buff - self.last_collected_buff))
+        self.last_collected_buff = collected_buff
+        buff_pick_reward = buff_delta * (40.0 if monster_goingto_speedup else 20.0)
+
+        # final step: reward vector
         dist_shaping_norm_weight = 12.8
 
         exploration_rate = 1.0
@@ -1718,12 +1724,13 @@ class Preprocessor:
             survival_weight * survive_phase_weight * abb_score,
             0.50 * los_break_reward,
             0.25 * flash_reward,
-            0.20 * near_wall_penalty,
+            0.30 * near_wall_penalty,
             0.50 * abb_penalty,
             0.10 * exploration_rate * explore_reward,
             0.30 * danger_penalty,
             0.30 * dist_shaping_norm_weight * treasure_dist_reward,
             0.30 * dist_shaping_norm_weight * buff_dist_reward,
+            survival_weight * buff_pick_reward,
             abs(1.50 * dist_shaping_norm_weight * monster_dist_reward),
             self.monster_prediction_error_avg,
         ]
