@@ -25,7 +25,7 @@ VIEW_MAP_SIZE = 21
 # Max distance bucket / 距离桶最大值
 MAX_DIST_BUCKET = 5.0
 # Max flash cooldown / 最大闪现冷却步数
-MAX_FLASH_CD = 2000.0
+MAX_FLASH_CD = 200.0
 # Max buff duration / buff最大持续时间
 MAX_BUFF_DURATION = 50.0
 
@@ -167,14 +167,13 @@ def _paint_path(layer, path, gx0, gy0, path_value=0.35, radius=0):
         return
 
     h, w = layer.shape
-    last_idx = len(path) - 1
     for idx, (px, pz) in enumerate(path):
         li = int(px - gx0)
         lj = int(pz - gy0)
         if not (0 <= li < h and 0 <= lj < w):
             continue
 
-        value = path_value
+        value = path_value * ()
         if radius <= 0:
             layer[li, lj] = value
         else:
@@ -1107,8 +1106,6 @@ class Preprocessor:
             dx = float(x - hero_x)
             dz = float(z - hero_z)
             dist = float(np.hypot(dx, dz))
-            dir_x = dx / dist if dist > 1e-6 else 0.0
-            dir_z = dz / dist if dist > 1e-6 else 0.0
             items.append({
                 "id": int(obj_id),
                 "pos": (int(x), int(z)),
@@ -1118,8 +1115,6 @@ class Preprocessor:
                 "feat": np.array([
                     float(np.clip(dx / MAP_SIZE, -1.0, 1.0)),
                     float(np.clip(dz / MAP_SIZE, -1.0, 1.0)),
-                    float(dir_x),
-                    float(dir_z),
                     _norm(dist, MAP_SIZE * 1.41),
                     1.0 if available else 0.0,
                 ], dtype=np.float32),
