@@ -836,67 +836,6 @@ class Preprocessor:
             "masked_local_passable": np.array(local_passable, copy=True),
         }
 
-    def _select_reachable_opposite_boundary_cluster(self, connected_clusters, monster_feat, angle_cos_threshold=0.0):
-        """
-        从所有“能到达”的 boundary clusters（即 connected_clusters）中，
-        选择一个与“怪物方向相反”最一致的 cluster。
-
-        monster_feat: [is_in_view, speed, rel_x, rel_z, dist_norm, dir_x, dir_z]
-        返回：
-            {
-                "center": (cx, cy),
-                "size": size,
-                "dist": agent 到该 cluster center 的局部距离,
-                "align": 与“远离怪物方向”的余弦相似度,
-            }
-            或 None
-        """
-        if not connected_clusters:
-            return None
-
-        mdx = float(monster_feat[5])
-        mdz = float(monster_feat[6])
-        mnorm = float(np.hypot(mdx, mdz))
-        if mnorm <= 1e-6:
-            return None
-
-        # 远离怪物方向 = -(hero->monster)
-        away_x = -mdx / mnorm
-        away_z = -mdz / mnorm
-
-        agent_x = float(LOCAL_MAP_HALF)
-        agent_y = float(LOCAL_MAP_HALF)
-
-        best = None
-        best_align = -1e9
-
-        for c in connected_clusters:
-            cx, cy = c["center"]
-            vx = float(cx - agent_x)
-            vy = float(cy - agent_y)
-            dist = float(np.hypot(vx, vy))
-            if dist <= 1e-6:
-                continue
-
-            uvx = vx / dist
-            uvy = vy / dist
-            align = float(uvx * away_x + uvy * away_z)
-
-            if align > best_align:
-                best_align = align
-                best = {
-                    "center": (float(cx), float(cy)),
-                    "size": int(c["size"]),
-                    "dist": float(dist),
-                    "align": float(align),
-                }
-
-        if best is None:
-            return None
-        if best["align"] < angle_cos_threshold:
-            return None
-        return best
-
     def _action_to_dir_vec(self, action_idx):
         """
         将动作索引映射成 8 方向单位向量。
@@ -1336,6 +1275,21 @@ class Preprocessor:
         self.monster_replan_counters[idx] -= 1
         return cur_pos
 
+    def _is_reachable_in_known_map(self, start, goal):
+        """
+        仅在当前已知可通行区域内判断 start 是否可达 goal。
+        用于过滤“视野内但被墙隔开”的宝箱/目标。
+        """
+        sx, sz = int(start[0]), int(start[1])
+        gx, gz = int(goal[0]), int(goal[1])
+        if not self._is_global_passable(sx, sz):
+            return False
+        if not self._is_global_passable(gx, gz):
+            return False
+        if (sx, sz) == (gx, gz):
+            return True
+        return len(self._astar_path((sx, sz), (gx, gz))) > 0
+
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
 
@@ -1360,6 +1314,10 @@ class Preprocessor:
         buff_remain_norm = _norm(hero["buff_remaining_time"], MAX_BUFF_DURATION)
 
         hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
+
+        # 先更新全局地图
+        if map_info is not None:
+            x0, x1, y0, y1, newly_discovered_passable_count = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
 
         # 怪物特征
         monsters = frame_state.get("monsters", [])
@@ -1445,9 +1403,8 @@ class Preprocessor:
             hero_pos, self.buff_memory, topk=2, prefer_available_only=False
         )
 
-        if map_info is not None:
-            x0, x1, y0, y1, newly_discovered_passable_count = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
 
+        # 地图特征
         map_feat = np.zeros((3, VIEW_MAP_SIZE, VIEW_MAP_SIZE), dtype=np.float32)
 
         crop_size = VIEW_MAP_SIZE
@@ -1514,6 +1471,8 @@ class Preprocessor:
             if not (0 <= ox < MAP_SIZE_INT and 0 <= oz < MAP_SIZE_INT):
                 continue
             if self.visibility_map[ox, oz] == 0:
+                continue
+            if not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
                 continue
 
             center_i = ox - gx0
