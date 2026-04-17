@@ -15,6 +15,7 @@ import os
 import time
 
 import numpy as np
+from collections import deque
 from agent_ppo.feature.definition import SampleData, sample_process
 from tools.metrics_utils import get_training_metrics
 from tools.train_env_conf_validate import read_usr_conf
@@ -72,7 +73,7 @@ class EpisodeRunner:
         self.monitor_report_interval = 2.0
         self.val_every_n_episode = 40
         self.val_episode_num = 10
-        self.train_score_window = []
+        self.train_score_window = deque(maxlen=20)  # 最近20局滑动窗口
 
 
     def _append_train_score_window(self, total_score, treasure_score, step_score):
@@ -110,7 +111,6 @@ class EpisodeRunner:
 
         self.monitor.put_data({os.getpid(): monitor_data})
         self.last_report_monitor_time = now
-        self.train_score_window.clear()
 
     def _make_eval_conf(self, map_ids):
         eval_conf = copy.deepcopy(self.val_usr_conf)

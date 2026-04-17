@@ -61,7 +61,7 @@ DIR8 = [
 SCAN_ANGLES_DEG = list(range(0, 360, 15))
 
 # Curriculum / 课程训练切换
-CURRICULUM_STAGE2_EPISODE = 2000
+CURRICULUM_STAGE2_EPISODE = 2500
 SURVIVAL_WEIGHT_STAGE1 = 1.0
 SURVIVAL_WEIGHT_STAGE2 = 1.2
 
@@ -1077,6 +1077,9 @@ class Preprocessor:
         flash_cd_norm = _norm(hero["flash_cooldown"], MAX_FLASH_CD)
         buff_remain_norm = _norm(hero["buff_remaining_time"], MAX_BUFF_DURATION)
 
+        if map_info is not None:
+            x0, x1, y0, y1, newly_discovered_passable_count = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
+
         hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
 
         # 怪物特征
@@ -1145,9 +1148,7 @@ class Preprocessor:
             hero_pos, self.buff_memory, topk=2, prefer_available_only=False
         )
 
-        if map_info is not None:
-            x0, x1, y0, y1, newly_discovered_passable_count = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
-
+        # 地图特征
         map_feat = np.zeros((3, VIEW_MAP_SIZE, VIEW_MAP_SIZE), dtype=np.float32)
 
         crop_size = VIEW_MAP_SIZE
@@ -1434,8 +1435,8 @@ class Preprocessor:
         survival_weight = SURVIVAL_WEIGHT_STAGE2 if in_stage2 else SURVIVAL_WEIGHT_STAGE1
 
         reward_vector = [
-            0.50 * score_gain,
-            0.03 * survival_weight * survive_phase_weight * survive_reward,
+            0.30 * score_gain,
+            0.30 * survival_weight * survive_phase_weight * survive_reward,
             0.50 * los_break_reward,
             0.25 * flash_reward,
             0.20 * near_wall_penalty,
