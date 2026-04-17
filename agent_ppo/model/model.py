@@ -108,10 +108,8 @@ class Model(nn.Module):
         self.actor_head = nn.Sequential(
             make_fc_layer(256, 256),
             nn.ReLU(),
-            nn.Dropout(self.head_dropout_p),
             make_fc_layer(256, 128),
             nn.ReLU(),
-            nn.Dropout(self.head_dropout_p),
             make_fc_layer(128, action_num),
         )
 

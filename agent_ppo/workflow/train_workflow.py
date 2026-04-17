@@ -159,7 +159,6 @@ class EpisodeRunner:
             reward_vec_keys = [
                 "r_score_gain_sum",
                 "r_survival_gain_sum",
-                "r_monster_dist_sum",
                 "r_monster_los_break_sum",
                 "r_flash_sum",
                 "r_wall_penalty_sum",
@@ -168,6 +167,8 @@ class EpisodeRunner:
                 "r_danger_penalty_sum",
                 "r_treasure_dist_sum",
                 "r_buff_dist_sum",
+                "r_buff_pick_sum",
+                "r_monster_dist_sum",
             ]
             episode_reward_vec_sum = np.zeros(len(reward_vec_keys), dtype=np.float32)
 

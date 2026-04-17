@@ -62,10 +62,8 @@ SCAN_ANGLES_DEG = list(range(0, 360, 15))
 
 # Curriculum / 课程训练切换
 CURRICULUM_STAGE2_EPISODE = 2000
-SCORE_GAIN_WEIGHT_STAGE1 = 0.50
-SCORE_GAIN_WEIGHT_STAGE2 = 0.70
-SURVIVAL_WEIGHT_STAGE1 = 0.03
-SURVIVAL_WEIGHT_STAGE2 = 0.08
+SURVIVAL_WEIGHT_STAGE1 = 1.0
+SURVIVAL_WEIGHT_STAGE2 = 1.2
 
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
@@ -1391,6 +1389,14 @@ class Preprocessor:
 
         abb_score, abb_penalty = self._compute_abb_penalty(cur_hero_pos)
 
+        # buff 奖励
+        monster_goingto_speedup = bool(reward_feats['progress_feats'][3] < 100)
+
+        collected_buff = int(env_info.get("collected_buff", self.last_collected_buff))
+        buff_delta = float(max(0, collected_buff - self.last_collected_buff))
+        self.last_collected_buff = collected_buff
+        buff_pick_reward = buff_delta * (40.0 if monster_goingto_speedup else 20.0)
+
         # 探索奖励
         newly_discovered_passable_count = reward_feats.get("newly_discovered_passable_count", 0)
         if self.step_no <= 1:
@@ -1424,10 +1430,12 @@ class Preprocessor:
 
         exploration_rate *= (2.0 if (not cur_is_dangerous) else 0.1)
 
+        in_stage2 = self.curriculum_episode >= CURRICULUM_STAGE2_EPISODE
+        survival_weight = SURVIVAL_WEIGHT_STAGE2 if in_stage2 else SURVIVAL_WEIGHT_STAGE1
+
         reward_vector = [
             0.50 * score_gain,
-            0.03 * survive_phase_weight * survive_reward,
-            3.50 * dist_shaping_norm_weight * monster_dist_reward,
+            0.03 * survival_weight * survive_phase_weight * survive_reward,
             0.50 * los_break_reward,
             0.25 * flash_reward,
             0.20 * near_wall_penalty,
@@ -1436,6 +1444,8 @@ class Preprocessor:
             0.30 * danger_penalty,
             0.30 * dist_shaping_norm_weight * treasure_dist_reward,
             0.30 * dist_shaping_norm_weight * buff_dist_reward,
+            survival_weight * buff_pick_reward,
+            abs(1.50 * dist_shaping_norm_weight * monster_dist_reward),
         ]
 
-        return reward_vector, sum(reward_vector)
+        return reward_vector, sum(reward_vector[-1]) + 1.50 * dist_shaping_norm_weight * monster_dist_reward
