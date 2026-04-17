@@ -20,7 +20,9 @@ from tools.metrics_utils import get_training_metrics
 from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
 
-CURRICULUM_STAGE2_EPISODE = 2500
+CURRICULUM_STAGE2_EPISODE = 2000
+MAP12_STAGE2_PROB = 0.60
+
 
 def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     last_save_model_time = time.time()
@@ -131,15 +133,15 @@ class EpisodeRunner:
             return train_conf
 
         map_ids = list(env_conf.get("map", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
-        # if episode_cnt < CURRICULUM_STAGE2_EPISODE:
-        #     return train_conf
+        if episode_cnt < CURRICULUM_STAGE2_EPISODE:
+            return train_conf
 
         focus_maps = [m for m in map_ids if m in (1, 2)]
         other_maps = [m for m in map_ids if m not in (1, 2)]
         if not focus_maps:
             return train_conf
 
-        if np.random.rand() < 0.6 or not other_maps:
+        if np.random.rand() < MAP12_STAGE2_PROB or not other_maps:
             chosen_map = int(np.random.choice(focus_maps))
         else:
             chosen_map = int(np.random.choice(other_maps))
@@ -196,8 +198,10 @@ class EpisodeRunner:
                 "r_danger_penalty_sum",
                 "r_treasure_dist_sum",
                 "r_buff_dist_sum",
-                "r_buff_pick_sum",
                 "r_monster_dist_sum",
+                "r_buff_pick_sum",
+                "monster_prediction_error_avg",
+                "monster_prediction_fallback_avg"
             ]
             episode_reward_vec_sum = np.zeros(len(reward_vec_keys), dtype=np.float32)
 
@@ -231,7 +235,10 @@ class EpisodeRunner:
                     copy_n = min(len(reward_vec_keys), reward_vector.shape[0])
                     aligned_reward_vector[:copy_n] = reward_vector[:copy_n]
                     reward_vector = aligned_reward_vector
-                episode_reward_vec_sum += reward_vector
+                if reward_vector.shape[0] > 0:
+                    episode_reward_vec_sum[:-2] += reward_vector[:-2]
+                    episode_reward_vec_sum[-2] = reward_vector[-2]
+                    episode_reward_vec_sum[-1] = reward_vector[-1]
                 total_reward += float(reward[0])
 
                 # Terminal reward / 终局奖励
