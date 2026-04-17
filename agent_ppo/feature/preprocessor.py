@@ -60,6 +60,13 @@ DIR8 = [
 # 24 个扫描角：0, 15, 30, ..., 345
 SCAN_ANGLES_DEG = list(range(0, 360, 15))
 
+# Curriculum / 课程训练切换
+CURRICULUM_STAGE2_EPISODE = 2000
+SCORE_GAIN_WEIGHT_STAGE1 = 0.50
+SCORE_GAIN_WEIGHT_STAGE2 = 0.70
+SURVIVAL_WEIGHT_STAGE1 = 0.03
+SURVIVAL_WEIGHT_STAGE2 = 0.08
+
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
 
@@ -181,6 +188,7 @@ class Preprocessor:
     def __init__(self, logger=None):
         self.logger = logger
         self.total_train_steps = 0
+        self.curriculum_episode = 0
         self.reset()
 
     def set_curriculum_episode(self, episode_cnt):
@@ -211,6 +219,9 @@ class Preprocessor:
         self.buff_memory = {}
         self.last_collected_buff = 0
         self.buff_refresh_time = 200
+
+        # 视野外怪物速度先验
+        self.last_seen_monster_speed = [1, 1]
 
         # ========= 两层全局记忆 =========
         # 第一层：可通行地图：1=可走, 0=不能走/未知
@@ -997,32 +1008,26 @@ class Preprocessor:
         penalty = -max(0.0, 1.0 - abb_score / max(self.abb_safe_score, 1e-6))
         return abb_score, penalty
 
+
     def _is_reachable_in_known_map(self, start, goal):
         """
-        仅在当前已知视野内，用“英雄到目标的连线是否被阻挡”来判断可达性。
-        不使用 A*。
-        规则：
-        - 起点终点都必须在地图内，且为已知可通行
-        - 目标必须在 hero 当前 21x21 视野内
-        - 若 hero 到目标的直线经过已知墙，则返回 False
-        - 若直线经过未知区域，也返回 False（因为这里只做当前视野内判断）
+        仅在当前 21x21 视野内，用“hero 到目标的直线是否被阻挡”判断可达性。
+        不使用 A*，也不绕路。
         """
         sx, sz = int(start[0]), int(start[1])
         gx, gz = int(goal[0]), int(goal[1])
 
-        # 基础合法性
         if not (0 <= sx < MAP_SIZE_INT and 0 <= sz < MAP_SIZE_INT):
             return False
         if not (0 <= gx < MAP_SIZE_INT and 0 <= gz < MAP_SIZE_INT):
             return False
 
-        # 起点终点必须是已知可通行
         if not self._is_global_passable(sx, sz):
             return False
         if not self._is_global_passable(gx, gz):
             return False
 
-        # 只判断当前 hero 21x21 视野内的目标
+        # 只判断 hero 当前 21x21 视野内的目标
         if abs(gx - sx) > LOCAL_MAP_HALF or abs(gz - sz) > LOCAL_MAP_HALF:
             return False
 
@@ -1042,16 +1047,13 @@ class Preprocessor:
 
             if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
                 return False
-
-            # 必须在当前已知区域内
             if self.visibility_map[x, z] == 0:
                 return False
-
-            # 直线被已知墙挡住
             if self._is_known_wall(x, z):
                 return False
 
         return True
+
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -1089,7 +1091,11 @@ class Preprocessor:
 
                 # 视野外时，hero_relative_direction 和 hero_l2_distance 仍然可用
                 is_in_view = float(m.get("is_in_view", 0))
-                m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED) if is_in_view else 0.0
+                if is_in_view:
+                    self.last_seen_monster_speed[i] = max(1, int(m.get("speed", 1)))
+                    m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED)
+                else:
+                    m_speed_norm = _norm(self.last_seen_monster_speed[i], MAX_MONSTER_SPEED)
 
                 rel_x = 0.0
                 rel_z = 0.0
