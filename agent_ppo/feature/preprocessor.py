@@ -1448,4 +1448,4 @@ class Preprocessor:
             abs(1.50 * dist_shaping_norm_weight * monster_dist_reward),
         ]
 
-        return reward_vector, sum(reward_vector[-1]) + 1.50 * dist_shaping_norm_weight * monster_dist_reward
+        return reward_vector, sum(reward_vector[:-1]) + 1.50 * dist_shaping_norm_weight * monster_dist_reward
