@@ -33,14 +33,14 @@ class ResidualBlock(nn.Module):
 class Model(nn.Module):
     def __init__(self, device=None):
         super().__init__()
-        self.model_name = "gorge_chase_cnn_v2"
+        self.model_name = "gorge_chase_cnn_gru_v1"
         self.device = device
 
         vector_dim = Config.VECTOR_FEATURE_LEN
         action_num = Config.ACTION_NUM
         value_num = Config.VALUE_NUM
+        rnn_hidden_size = Config.RNN_HIDDEN_SIZE
 
-        # dropout 配置
         self.vec_dropout_p = 0.10
         self.map_dropout_p = 0.10
         self.fusion_dropout_p = 0.15
@@ -66,7 +66,7 @@ class Model(nn.Module):
         self.map_stage1 = nn.Sequential(
             ResidualBlock(32, dropout_p=self.map_dropout_p),
             ResidualBlock(32, dropout_p=self.map_dropout_p),
-            nn.MaxPool2d(2),   # 36 -> 18
+            nn.MaxPool2d(2),
         )
 
         self.map_stage2 = nn.Sequential(
@@ -75,7 +75,7 @@ class Model(nn.Module):
             nn.Dropout2d(self.map_dropout_p),
             ResidualBlock(64, dropout_p=self.map_dropout_p),
             ResidualBlock(64, dropout_p=self.map_dropout_p),
-            nn.MaxPool2d(2),   # 18 -> 9
+            nn.MaxPool2d(2),
         )
         nn.init.orthogonal_(self.map_stage2[0].weight.data)
         nn.init.zeros_(self.map_stage2[0].bias.data)
@@ -105,8 +105,20 @@ class Model(nn.Module):
             nn.Dropout(self.fusion_dropout_p),
         )
 
+        self.rnn = nn.GRU(
+            input_size=256,
+            hidden_size=rnn_hidden_size,
+            num_layers=Config.RNN_NUM_LAYERS,
+            batch_first=True,
+        )
+        for name, param in self.rnn.named_parameters():
+            if 'weight' in name:
+                nn.init.orthogonal_(param.data)
+            elif 'bias' in name:
+                nn.init.zeros_(param.data)
+
         self.actor_head = nn.Sequential(
-            make_fc_layer(256, 256),
+            make_fc_layer(rnn_hidden_size, 256),
             nn.ReLU(),
             make_fc_layer(256, 128),
             nn.ReLU(),
@@ -114,7 +126,7 @@ class Model(nn.Module):
         )
 
         self.critic_head = nn.Sequential(
-            make_fc_layer(256, 256),
+            make_fc_layer(rnn_hidden_size, 256),
             nn.ReLU(),
             nn.Dropout(self.head_dropout_p),
             make_fc_layer(256, 128),
@@ -129,7 +141,7 @@ class Model(nn.Module):
             make_fc_layer(64, 8),
         )
 
-    def forward(self, vector_obs, map_obs, inference=False):
+    def _encode_obs(self, vector_obs, map_obs):
         vector_hidden = self.vector_encoder(vector_obs)
 
         x = self.map_stem(map_obs)
@@ -142,13 +154,37 @@ class Model(nn.Module):
 
         hidden = torch.cat([vector_hidden, map_hidden], dim=1)
         hidden = self.fusion(hidden)
+        return hidden, map_hidden
 
-        logits = self.actor_head(hidden)
+    def forward(self, vector_obs, map_obs, hidden_state=None, inference=False):
+        fused_hidden, map_hidden = self._encode_obs(vector_obs, map_obs)
+
+        if inference:
+            rnn_in = fused_hidden.unsqueeze(1)
+            rnn_out, next_hidden_state = self.rnn(rnn_in, hidden_state)
+            rnn_hidden = rnn_out.squeeze(1)
+        else:
+            rnn_in = fused_hidden.unsqueeze(0)
+            rnn_out, next_hidden_state = self.rnn(rnn_in, hidden_state)
+            rnn_hidden = rnn_out.squeeze(0)
+
+        logits = self.actor_head(rnn_hidden)
         move_bias = self.move_bias_head(map_hidden)
         logits[:, :8] = logits[:, :8] + move_bias
 
-        value = self.critic_head(hidden)
-        return logits, value
+        value = self.critic_head(rnn_hidden)
+        return logits, value, next_hidden_state
+
+    def get_initial_state(self, batch_size=1, device=None):
+        if device is None:
+            device = self.device
+        return torch.zeros(
+            Config.RNN_NUM_LAYERS,
+            batch_size,
+            Config.RNN_HIDDEN_SIZE,
+            device=device,
+            dtype=torch.float32,
+        )
 
     def set_train_mode(self):
         self.train()

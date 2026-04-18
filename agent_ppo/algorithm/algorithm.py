@@ -63,7 +63,7 @@ class Algorithm:
         self.model.set_train_mode()
         self.optimizer.zero_grad()
 
-        logits, value_pred = self.model(vector_obs, map_obs)
+        logits, value_pred, _ = self.model(vector_obs, map_obs, inference=False)
 
         total_loss, info_list = self._compute_loss(
             logits=logits,

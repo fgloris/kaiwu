@@ -45,3 +45,7 @@ class Config:
     CLIP_PARAM = 0.2
     VF_COEF = 1.0
     GRAD_CLIP_RANGE = 0.5
+
+    # RNN / recurrent policy
+    RNN_HIDDEN_SIZE = 128
+    RNN_NUM_LAYERS = 1

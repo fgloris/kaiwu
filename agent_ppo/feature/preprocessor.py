@@ -154,34 +154,6 @@ def _paint_square(mask, center_i, center_j, radius=1, value=1.0):
             if 0 <= ii < h and 0 <= jj < w:
                 mask[ii, jj] = value
 
-def _paint_recent_positions_on_passable(layer, positions, gx0, gy0):
-    """
-    将最近若干帧自身轨迹画到 passable layer 上。
-    采用递增强度，越新的位置越明显。
-    """
-    if positions is None:
-        return
-
-    positions = list(positions)
-    if not positions:
-        return
-
-    total = len(positions)
-    h, w = layer.shape
-    for idx, (px, pz) in enumerate(positions):
-        li = int(px - gx0)
-        lj = int(pz - gy0)
-        if not (0 <= li < h and 0 <= lj < w):
-            continue
-        # 仅在可通行位置上覆盖，避免把障碍误画亮
-        if layer[li, lj] <= 0.0:
-            continue
-        if total == 1:
-            value = 0.6
-        else:
-            value = 0.8 - 0.6 * (idx / float(total - 1))
-        layer[li, lj] = value
-
 class Preprocessor:
     def __init__(self, logger=None):
         self.logger = logger
@@ -1165,15 +1137,6 @@ class Preprocessor:
                 gy = gy0 + j
                 if 0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT:
                     map_feat[0, i, j] = float(self.passable_map[gx, gy])
-        
-        # 在 passable layer 上叠加自身最近轨迹
-        recent_self_path = list(self.pos_history) + [(int(hero_pos["x"]), int(hero_pos["z"]))]
-        _paint_recent_positions_on_passable(
-            map_feat[0],
-            recent_self_path,
-            gx0=gx0,
-            gy0=gy0,
-        )
 
         # 第二层：monster mask
         # 规则：

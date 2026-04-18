@@ -39,6 +39,7 @@ class Agent(BaseAgent):
         self.algorithm = Algorithm(self.model, self.optimizer, self.device, logger, monitor)
         self.preprocessor = Preprocessor(logger)
         self.last_action = -1
+        self.rnn_hidden = None
         self.logger = logger
         self.monitor = monitor
         super().__init__(agent_type, device, logger, monitor)
@@ -50,6 +51,7 @@ class Agent(BaseAgent):
         """
         self.preprocessor.reset()
         self.last_action = -1
+        self.rnn_hidden = self.model.get_initial_state(batch_size=1, device=self.device)
 
     def observation_process(self, env_obs):
         """Convert raw env_obs to ObsData and remain_info.
@@ -144,13 +146,21 @@ class Agent(BaseAgent):
         map_tensor = torch.tensor(np.array([map_feature]), dtype=torch.float32).to(self.device)
         map_tensor = map_tensor.view(-1, Config.MAP_CHANNEL, Config.MAP_SIZE, Config.MAP_SIZE)
 
+        if self.rnn_hidden is None:
+            self.rnn_hidden = self.model.get_initial_state(batch_size=1, device=self.device)
+
         with torch.no_grad():
-            logits, value = self.model(vector_tensor, map_tensor, inference=True)
+            logits, value, next_hidden = self.model(
+                vector_tensor,
+                map_tensor,
+                hidden_state=self.rnn_hidden,
+                inference=True,
+            )
+        self.rnn_hidden = next_hidden.detach()
 
         logits_np = logits.cpu().numpy()[0]
         value_np = value.cpu().numpy()[0]
 
-        # Legal action masked softmax / 合法动作掩码 softmax
         legal_action_np = np.array(legal_action, dtype=np.float32)
         prob = self._legal_soft_max(logits_np, legal_action_np)
 
