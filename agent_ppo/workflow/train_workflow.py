@@ -165,7 +165,6 @@ class EpisodeRunner:
                 "r_flash_sum",
                 "r_wall_penalty_sum",
                 "r_abb_penalty_sum",
-                "r_exploration_sum",
                 "r_danger_penalty_sum",
                 "r_treasure_dist_sum",
                 "r_buff_dist_sum",

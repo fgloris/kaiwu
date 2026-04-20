@@ -1407,12 +1407,6 @@ class Preprocessor:
         self.last_collected_buff = collected_buff
         buff_pick_reward = buff_delta * (40.0 if monster_goingto_speedup else 20.0)
 
-        # 探索奖励
-        newly_discovered_passable_count = reward_feats.get("newly_discovered_passable_count", 0)
-        if self.step_no <= 1:
-            explore_reward = 0.0
-        else: explore_reward = _norm(newly_discovered_passable_count, 40.0)
-
         # 生存奖励
         survive_phase_weight = 1.00 + (self.step_no / 200)
         survive_reward = 1.00
@@ -1432,14 +1426,6 @@ class Preprocessor:
         # final step reward vector
         dist_shaping_norm_weight = 12.8
 
-        exploration_rate = 1.0
-        if cur_invisible_1 and cur_invisible_2:
-            exploration_rate = 2.0
-        else:
-            exploration_rate = 0.1
-
-        exploration_rate *= (2.0 if (not cur_is_dangerous) else 0.1)
-
         # ============== 最终奖励向量 ==============
         reward_config = _get_curriculum_reward_config(self.curriculum_episode)
         reward_vector = [
@@ -1449,7 +1435,6 @@ class Preprocessor:
             reward_config.flash * flash_reward,
             reward_config.wall_penalty * near_wall_penalty,
             reward_config.abb_penalty * abb_penalty,
-            reward_config.exploration * exploration_rate * explore_reward,
             reward_config.danger_penalty * danger_penalty,
             reward_config.treasure_dist * dist_shaping_norm_weight * treasure_dist_reward,
             reward_config.buff_dist * dist_shaping_norm_weight * buff_dist_reward,

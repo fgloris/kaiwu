@@ -15,7 +15,6 @@ class CurriculumRewardConfig:
     flash: float
     wall_penalty: float
     abb_penalty: float
-    exploration: float
     danger_penalty: float
     treasure_dist: float
     buff_dist: float
@@ -36,7 +35,6 @@ CURRICULUM_REWARD_CONFIGS = (
         flash=0.15,
         wall_penalty=0.10,
         abb_penalty=0.10,
-        exploration=0.30,
         danger_penalty=0.15,
         treasure_dist=0.80,
         buff_dist=0.40,
@@ -54,7 +52,6 @@ CURRICULUM_REWARD_CONFIGS = (
         flash=0.20,
         wall_penalty=0.15,
         abb_penalty=0.15,
-        exploration=0.20,
         danger_penalty=0.25,
         treasure_dist=0.50,
         buff_dist=0.35,
@@ -72,7 +69,6 @@ CURRICULUM_REWARD_CONFIGS = (
         flash=0.25,
         wall_penalty=0.20,
         abb_penalty=0.20,
-        exploration=0.10,
         danger_penalty=0.35,
         treasure_dist=0.30,
         buff_dist=0.30,
@@ -90,7 +86,6 @@ CURRICULUM_REWARD_CONFIGS = (
         flash=0.30,
         wall_penalty=0.25,
         abb_penalty=0.25,
-        exploration=0.05,
         danger_penalty=0.45,
         treasure_dist=0.25,
         buff_dist=0.25,
