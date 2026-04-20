@@ -1072,7 +1072,7 @@ class Preprocessor:
         env_info = observation["env_info"]
         map_info = observation["map_info"]
         legal_act_raw = observation["legal_action"]
-        self.logger.warning(f"legal_action: {legal_act_raw}")
+        # self.logger.warning(f"legal_action: {legal_act_raw}")
 
         self.step_no = observation["step_no"]
         self.max_step = env_info.get("max_step", 200)
