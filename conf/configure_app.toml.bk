@@ -68,4 +68,4 @@ preload_model_dir = "agent_ppo/ckpt"
 # 注意，禁止修改原始模型文件名，否则将导致模型预加载流程失败。
 preload_model_id = 1714
 eval_model_dir = "/data/projects/gorge_chase/ckpt"
-eval_model_id = "20391"
+eval_model_id = "2658"

@@ -19,8 +19,8 @@ class Config:
         7,   # monster2
         8,   # ray collision
         8,   # boundery cluster
-        8,   # nearest 2 treasures
-        8,   # 2 buffs
+        8,  # nearest 2 treasures
+        8,  # 2 buffs
         16,  # legal action mask
         4,   # progress
         2,   # situation
@@ -45,3 +45,23 @@ class Config:
     CLIP_PARAM = 0.2
     VF_COEF = 1.0
     GRAD_CLIP_RANGE = 0.5
+
+    # ============== 课程学习配置 ==============
+    # 阶段定义
+    CURRICULUM_STAGE_1_END = 800     # 入门阶段结束
+    CURRICULUM_STAGE_2_END = 1800    # 成长阶段结束
+    CURRICULUM_STAGE_3_END = 3000    # 高级阶段结束
+
+    # 阶段1：入门阶段（只有1个怪物，高探索高宝藏）
+    # 阶段2：成长阶段（第2个怪物，平衡）
+    # 阶段3：高级阶段（完全配置）
+    # 阶段4：专家阶段（自适应调整）
+
+    # 各阶段的地图分组
+    MAP_GROUP_EASY = [1, 2]            # 简单地图
+    MAP_GROUP_MEDIUM = [3, 4, 5, 6]    # 中等地图
+    MAP_GROUP_HARD = [7, 8, 9, 10]     # 困难地图
+
+    # 自适应调整的分数阈值
+    ADAPTIVE_THRESHOLD_HIGH = 250.0    # 高分阈值，进入下一阶段
+    ADAPTIVE_THRESHOLD_LOW = 150.0     # 低分阈值，降低难度
