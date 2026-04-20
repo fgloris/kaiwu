@@ -214,6 +214,9 @@ class Preprocessor:
         self.last_total_score = 0.0
         self.last_flash_count = 0
         self.last_is_dangerous = False
+        self.last_hero_pos = None
+        self.last_connected_opening_count = 0
+        self.last_monster_to_agent_vecs = [None, None]
 
         self.pos_history = deque(maxlen=8)
         self.abb_safe_score = 4.0
@@ -322,6 +325,49 @@ class Preprocessor:
         if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
             return True  # 出界直接视为墙，更保守
         return bool(self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0)
+
+        return bool(self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0)
+
+    def _did_segment_cross_known_wall(self, start_pos, end_pos):
+        if start_pos is None or end_pos is None:
+            return False
+
+        x0, z0 = int(start_pos[0]), int(start_pos[1])
+        x1, z1 = int(end_pos[0]), int(end_pos[1])
+        dx = x1 - x0
+        dz = z1 - z0
+        steps = int(max(abs(dx), abs(dz)) * 2)
+        if steps <= 1:
+            return False
+
+        for i in range(1, steps):
+            t = i / float(steps)
+            x = int(round(x0 + dx * t))
+            z = int(round(z0 + dz * t))
+            if (x, z) == (x0, z0) or (x, z) == (x1, z1):
+                continue
+            if self._is_known_wall(x, z):
+                return True
+        return False
+
+    def _monster_to_agent_vector(self, monster_feat):
+        rel_x = float(monster_feat[2])
+        rel_z = float(monster_feat[3])
+        vec = np.asarray([-rel_x, -rel_z], dtype=np.float32)
+        norm = float(np.linalg.norm(vec))
+        if norm <= 1e-6:
+            return None
+        return vec / norm
+
+    def _did_cross_monster_by_angle(self, cur_monster_vecs, angle_threshold=150.0):
+        for last_vec, cur_vec in zip(self.last_monster_to_agent_vecs, cur_monster_vecs):
+            if last_vec is None or cur_vec is None:
+                continue
+            cos_angle = float(np.clip(np.dot(last_vec, cur_vec), -1.0, 1.0))
+            angle = float(np.degrees(np.arccos(cos_angle)))
+            if angle > angle_threshold:
+                return True
+        return False
 
     def _parse_legal_action_raw(self, legal_act_raw):
         """Parse env legal_action into a 16D binary mask."""
@@ -1257,7 +1303,7 @@ class Preprocessor:
             radius=3,
         )
         boundary_cluster_feat, boundary_cluster_info = self._compute_boundary_cluster_direction_scores(
-            local_passable_21_masked
+            local_passable_21
         )
         connected_opening_count = _norm(boundary_cluster_info["connected_opening_count"], 5)
         is_dangerous = _norm(int(boundary_cluster_info["is_dangerous"]), 1)
@@ -1371,22 +1417,10 @@ class Preprocessor:
         
         # 局势相关 reward settings
         cur_is_dangerous = bool(reward_feats.get("is_dangerous", False))
-        danger_to_safe_reward = 1.0 if (self.last_is_dangerous and (not cur_is_dangerous)) else 0.0
+        cur_opening_count = int(reward_feats.get("connected_opening_count", 0))
+        last_opening_count = int(self.last_connected_opening_count)
         danger_penalty = -1.0 if cur_is_dangerous else 0.0
-        self.last_is_dangerous = cur_is_dangerous
 
-        # 闪现释放奖励：仅当“危险 -> 不危险”时给大分
-        flash_reward = 0.0
-        flash_count = env_info.get("flash_count", 0)
-        if (flash_count - self.last_flash_count) > 0:
-            if danger_to_safe_reward > 0.0:
-                flash_reward = 3.0
-            else:
-                flash_reward = -0.5
-        self.last_flash_count = flash_count
-
-        connected_boundary_clusters = reward_feats.get("connected_boundary_clusters", [])
-        last_action = reward_feats.get("last_action", -1)
 
         # 靠墙惩罚：只在 hero 周围 5x5 小窗口内查最近已知墙，减少计算量
         near_wall_penalty = 0.0
@@ -1397,7 +1431,39 @@ class Preprocessor:
                 search_radius=3,
             )
 
+        # abb 惩罚项
         abb_score, abb_penalty = self._compute_abb_penalty(cur_hero_pos)
+        
+        # 闪现只奖励受困追逃局势下的有效逃生，非受困乱闪会被惩罚。
+        flash_reward = 0.0
+
+        flash_count = int(env_info.get("flash_count", self.last_flash_count))
+        used_flash = (flash_count - self.last_flash_count) > 0
+        danger_decreased = last_opening_count <= 1 and cur_opening_count > 1
+        crossed_wall = used_flash and self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
+        cur_monster_to_agent_vecs = [
+            self._monster_to_agent_vector(m1),
+            self._monster_to_agent_vector(m2) if second_exists else None,
+        ]
+        crossed_monster = used_flash and last_opening_count <= 1 and self._did_cross_monster_by_angle(
+            cur_monster_to_agent_vecs,
+            angle_threshold=150.0,
+        )
+
+        flash_reward = 0.0
+        if used_flash:
+            if danger_decreased and crossed_wall:
+                flash_reward = 4.0
+            elif crossed_monster:
+                flash_reward = 3.0
+            else:
+                flash_reward = -1.0
+
+        self.last_flash_count = flash_count
+        self.last_is_dangerous = cur_is_dangerous
+        self.last_hero_pos = cur_hero_pos
+        self.last_connected_opening_count = cur_opening_count
+        self.last_monster_to_agent_vecs = cur_monster_to_agent_vecs
 
         # buff 奖励
         monster_goingto_speedup = bool(reward_feats['progress_feats'][3] < 100)

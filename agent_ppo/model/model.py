@@ -43,7 +43,7 @@ class Model(nn.Module):
         # dropout 配置
         self.vec_dropout_p = 0.10
         self.map_dropout_p = 0.10
-        self.fusion_dropout_p = 0.15
+        self.fusion_dropout_p = 0.10
         self.head_dropout_p = 0.10
 
         self.vector_encoder = nn.Sequential(
