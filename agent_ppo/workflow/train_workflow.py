@@ -20,20 +20,6 @@ from tools.metrics_utils import get_training_metrics
 from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
 
-# 多级课程学习阶段定义
-CURRICULUM_STAGE_1_END = 800
-CURRICULUM_STAGE_2_END = 1800
-CURRICULUM_STAGE_3_END = 3000
-
-# 地图分组
-MAP_GROUP_EASY = [1, 2]            # 简单地图
-MAP_GROUP_MEDIUM = [3, 4, 5, 6]    # 中等地图
-MAP_GROUP_HARD = [7, 8, 9, 10]     # 困难地图
-
-# 自适应调整阈值
-ADAPTIVE_THRESHOLD_HIGH = 250.0
-ADAPTIVE_THRESHOLD_LOW = 150.0
-
 def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     last_save_model_time = time.time()
     env = envs[0]
@@ -87,12 +73,6 @@ class EpisodeRunner:
         self.val_episode_num = 10
         self.train_score_window = []
         
-        # 课程学习相关变量
-        self.cur_stage = 1
-        self.avg_total_score_history = []
-        self.force_stage = None  # 强制阶段（用于调试）
-
-
     def _append_train_score_window(self, total_score, treasure_score, step_score):
         self.train_score_window.append({
             "total_score": float(total_score),
@@ -141,99 +121,6 @@ class EpisodeRunner:
                 eval_conf["map_random"] = False
         return eval_conf
 
-    def _get_curriculum_stage(self, episode_cnt):
-        """获取当前训练阶段，支持自适应调整"""
-        if self.force_stage is not None:
-            return self.force_stage
-            
-        # 基于episodes计数的基础阶段
-        if episode_cnt < CURRICULUM_STAGE_1_END:
-            base_stage = 1
-        elif episode_cnt < CURRICULUM_STAGE_2_END:
-            base_stage = 2
-        elif episode_cnt < CURRICULUM_STAGE_3_END:
-            base_stage = 3
-        else:
-            base_stage = 4
-            
-        # 自适应调整：基于最近的验证分数
-        if self.avg_total_score_history:
-            recent_avg = np.mean(self.avg_total_score_history[-3:])  # 最近3次验证的平均分
-            # 高分加速，低分降级
-            if recent_avg > ADAPTIVE_THRESHOLD_HIGH and base_stage < 4:
-                return min(base_stage + 1, 4)
-            elif recent_avg < ADAPTIVE_THRESHOLD_LOW and base_stage > 1:
-                return max(base_stage - 1, 1)
-                
-        return base_stage
-        
-    def _get_maps_for_stage(self, stage):
-        """根据阶段获取可用地图"""
-        if stage == 1:
-            return MAP_GROUP_EASY.copy()  # 只有简单地图
-        elif stage == 2:
-            return MAP_GROUP_EASY + MAP_GROUP_MEDIUM  # 简单+中等
-        elif stage == 3:
-            return MAP_GROUP_EASY + MAP_GROUP_MEDIUM + MAP_GROUP_HARD  # 全部，但偏好简单
-        else:  # stage 4
-            return MAP_GROUP_EASY + MAP_GROUP_MEDIUM + MAP_GROUP_HARD  # 全部地图
-    
-    def _make_train_conf_for_episode(self, episode_cnt):
-        train_conf = copy.deepcopy(self.train_usr_conf)
-        env_conf = train_conf.get("env_conf", train_conf) if isinstance(train_conf, dict) else train_conf
-        if not isinstance(env_conf, dict):
-            return train_conf
-
-        # 确定当前阶段
-        stage = self._get_curriculum_stage(episode_cnt)
-        if stage != self.cur_stage:
-            self.logger.info(f"[CURRICULUM] 进入阶段 {stage}!")
-            self.cur_stage = stage
-            
-        # 获取当前阶段可用地图
-        available_maps = self._get_maps_for_stage(stage)
-        
-        # 阶段1：只在简单地图，高探索率
-        if stage == 1:
-            focus_maps = MAP_GROUP_EASY
-            focus_prob = 1.0  # 100%概率选择简单地图
-        # 阶段2：加入中等地图，50%简单，50%中等
-        elif stage == 2:
-            focus_maps = MAP_GROUP_EASY
-            other_maps = MAP_GROUP_MEDIUM
-            focus_prob = 0.5
-        # 阶段3：简单30%，中等40%，困难30%
-        elif stage == 3:
-            r = np.random.rand()
-            if r < 0.3:
-                focus_maps = MAP_GROUP_EASY
-            elif r < 0.7:
-                focus_maps = MAP_GROUP_MEDIUM
-            else:
-                focus_maps = MAP_GROUP_HARD
-            chosen_map = int(np.random.choice(focus_maps))
-            env_conf["map"] = [chosen_map]
-            env_conf["map_random"] = False
-            return train_conf
-        # 阶段4：平均选择所有地图
-        else:
-            chosen_map = int(np.random.choice(available_maps))
-            env_conf["map"] = [chosen_map]
-            env_conf["map_random"] = False
-            return train_conf
-            
-        # 针对阶段1-2的概率选择逻辑
-        other_maps = [m for m in available_maps if m not in focus_maps]
-        
-        if np.random.rand() < focus_prob or not other_maps:
-            chosen_map = int(np.random.choice(focus_maps))
-        else:
-            chosen_map = int(np.random.choice(other_maps))
-
-        env_conf["map"] = [chosen_map]
-        env_conf["map_random"] = False
-        return train_conf
-
     def run_episodes(self):
         """Run a single episode and yield collected samples.
 
@@ -251,7 +138,7 @@ class EpisodeRunner:
             collector = []
             self.episode_cnt += 1
 
-            train_conf_this_episode = self._make_train_conf_for_episode(self.episode_cnt)
+            train_conf_this_episode = copy.deepcopy(self.train_usr_conf)
 
             # Reset env / 重置环境
             env_obs = self.env.reset(train_conf_this_episode)
@@ -479,19 +366,10 @@ class EpisodeRunner:
         eval_12 = self._run_validation_group([1, 2], "eval_12")
         if eval_12 is not None:
             monitor_data.update(eval_12)
-            # 记录平均分用于自适应调整
-            avg_score = eval_12.get("eval_12_total_score", 0)
-            self.avg_total_score_history.append(avg_score)
-            # 只保留最近10次
-            if len(self.avg_total_score_history) > 10:
-                self.avg_total_score_history = self.avg_total_score_history[-10:]
 
         eval_910 = self._run_validation_group([9, 10], "eval_910")
         if eval_910 is not None:
             monitor_data.update(eval_910)
-
-        # 记录当前阶段
-        monitor_data["curriculum_stage"] = self.cur_stage
 
         if self.monitor and monitor_data:
             self.monitor.put_data({os.getpid(): monitor_data})

@@ -14,6 +14,7 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 import json
 import numpy as np
 from collections import deque
+from agent_ppo.feature.curriculum import CURRICULUM_REWARD_CONFIGS
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
@@ -65,10 +66,13 @@ DIR8 = [
 # 24 个扫描角：0, 15, 30, ..., 345
 SCAN_ANGLES_DEG = list(range(0, 360, 15))
 
-# Curriculum / 课程训练切换
-CURRICULUM_STAGE2_EPISODE = 2500
-SURVIVAL_WEIGHT_STAGE1 = 1.0
-SURVIVAL_WEIGHT_STAGE2 = 1.2
+
+def _get_curriculum_reward_config(episode):
+    episode = int(max(0, episode))
+    for config in CURRICULUM_REWARD_CONFIGS:
+        if config.episode_end < 0 or episode < config.episode_end:
+            return config
+    return CURRICULUM_REWARD_CONFIGS[-1]
 
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
@@ -1436,91 +1440,21 @@ class Preprocessor:
 
         exploration_rate *= (2.0 if (not cur_is_dangerous) else 0.1)
 
-        # ============== 多级课程学习阶段判定 ==============
-        episode = self.curriculum_episode
-        if episode < CURRICULUM_STAGE_1_END:
-            stage = 1
-            stage_name = "入门阶段"
-            # 阶段1：入门 - 高探索、高宝藏奖励，低生存压力
-            w_score_gain = 0.50
-            w_survival = 0.15
-            w_los_break = 0.20
-            w_flash = 0.15
-            w_wall_penalty = 0.10
-            w_abb_penalty = 0.10
-            w_exploration = 0.30
-            w_danger_penalty = 0.15
-            w_treasure_dist = 0.80
-            w_buff_dist = 0.40
-            w_buff_pick = 1.0
-            w_monster_dist = 0.80
-            survival_weight = 0.8
-        elif episode < CURRICULUM_STAGE_2_END:
-            stage = 2
-            stage_name = "成长阶段"
-            # 阶段2：成长 - 平衡各奖励
-            w_score_gain = 0.35
-            w_survival = 0.25
-            w_los_break = 0.35
-            w_flash = 0.20
-            w_wall_penalty = 0.15
-            w_abb_penalty = 0.15
-            w_exploration = 0.20
-            w_danger_penalty = 0.25
-            w_treasure_dist = 0.50
-            w_buff_dist = 0.35
-            w_buff_pick = 0.8
-            w_monster_dist = 1.2
-            survival_weight = 1.0
-        elif episode < CURRICULUM_STAGE_3_END:
-            stage = 3
-            stage_name = "高级阶段"
-            # 阶段3：高级 - 增加生存权重
-            w_score_gain = 0.25
-            w_survival = 0.35
-            w_los_break = 0.50
-            w_flash = 0.25
-            w_wall_penalty = 0.20
-            w_abb_penalty = 0.20
-            w_exploration = 0.10
-            w_danger_penalty = 0.35
-            w_treasure_dist = 0.30
-            w_buff_dist = 0.30
-            w_buff_pick = 0.7
-            w_monster_dist = 1.5
-            survival_weight = 1.1
-        else:
-            stage = 4
-            stage_name = "专家阶段"
-            # 阶段4：专家 - 高生存权重，强调躲避怪物
-            w_score_gain = 0.20
-            w_survival = 0.45
-            w_los_break = 0.60
-            w_flash = 0.30
-            w_wall_penalty = 0.25
-            w_abb_penalty = 0.25
-            w_exploration = 0.05
-            w_danger_penalty = 0.45
-            w_treasure_dist = 0.25
-            w_buff_dist = 0.25
-            w_buff_pick = 0.6
-            w_monster_dist = 1.8
-            survival_weight = 1.3
-
         # ============== 最终奖励向量 ==============
+        reward_config = _get_curriculum_reward_config(self.curriculum_episode)
         reward_vector = [
-            w_score_gain * score_gain,
-            w_survival * survival_weight * survive_phase_weight * survive_reward,
-            w_los_break * los_break_reward,
-            w_flash * flash_reward,
-            w_wall_penalty * near_wall_penalty,
-            w_abb_penalty * abb_penalty,
-            w_exploration * exploration_rate * explore_reward,
-            w_danger_penalty * danger_penalty,
-            w_treasure_dist * dist_shaping_norm_weight * treasure_dist_reward,
-            w_buff_dist * dist_shaping_norm_weight * buff_dist_reward,
-            survival_weight * w_buff_pick * buff_pick_reward,
-            abs(w_monster_dist * dist_shaping_norm_weight * monster_dist_reward),
+            reward_config.score_gain * score_gain,
+            reward_config.survival * reward_config.survival_multiplier * survive_phase_weight * survive_reward,
+            reward_config.los_break * los_break_reward,
+            reward_config.flash * flash_reward,
+            reward_config.wall_penalty * near_wall_penalty,
+            reward_config.abb_penalty * abb_penalty,
+            reward_config.exploration * exploration_rate * explore_reward,
+            reward_config.danger_penalty * danger_penalty,
+            reward_config.treasure_dist * dist_shaping_norm_weight * treasure_dist_reward,
+            reward_config.buff_dist * dist_shaping_norm_weight * buff_dist_reward,
+            reward_config.survival_multiplier * reward_config.buff_pick * buff_pick_reward,
+            abs(reward_config.monster_dist * dist_shaping_norm_weight * monster_dist_reward),
         ]
 
         return reward_vector, sum(reward_vector[:-1]) + 1.50 * dist_shaping_norm_weight * monster_dist_reward
