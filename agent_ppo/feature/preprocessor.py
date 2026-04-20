@@ -60,11 +60,6 @@ DIR8 = [
 # 24 个扫描角：0, 15, 30, ..., 345
 SCAN_ANGLES_DEG = list(range(0, 360, 15))
 
-# Curriculum / 课程训练切换
-CURRICULUM_STAGE2_EPISODE = 2500
-SURVIVAL_WEIGHT_STAGE1 = 1.0
-SURVIVAL_WEIGHT_STAGE2 = 1.2
-
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
 
@@ -153,34 +148,6 @@ def _paint_square(mask, center_i, center_j, radius=1, value=1.0):
             jj = center_j + dj
             if 0 <= ii < h and 0 <= jj < w:
                 mask[ii, jj] = value
-
-def _paint_recent_positions_on_passable(layer, positions, gx0, gy0):
-    """
-    将最近若干帧自身轨迹画到 passable layer 上。
-    采用递增强度，越新的位置越明显。
-    """
-    if positions is None:
-        return
-
-    positions = list(positions)
-    if not positions:
-        return
-
-    total = len(positions)
-    h, w = layer.shape
-    for idx, (px, pz) in enumerate(positions):
-        li = int(px - gx0)
-        lj = int(pz - gy0)
-        if not (0 <= li < h and 0 <= lj < w):
-            continue
-        # 仅在可通行位置上覆盖，避免把障碍误画亮
-        if layer[li, lj] <= 0.0:
-            continue
-        if total == 1:
-            value = 0.6
-        else:
-            value = 0.8 - 0.6 * (idx / float(total - 1))
-        layer[li, lj] = value
 
 class Preprocessor:
     def __init__(self, logger=None):
@@ -1207,7 +1174,7 @@ class Preprocessor:
                     rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
 
                     raw_dist = np.sqrt(dx * dx + dz * dz)
-                    dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 10)
+                    # dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 10)
 
                     # 视野内时，用连续方向覆盖离散方向
                     if raw_dist > 1e-6:
@@ -1256,15 +1223,6 @@ class Preprocessor:
                 if 0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT:
                     map_feat[0, i, j] = float(self.passable_map[gx, gy])
         
-        # 在 passable layer 上叠加自身最近轨迹
-        recent_self_path = list(self.pos_history) + [(int(hero_pos["x"]), int(hero_pos["z"]))]
-        _paint_recent_positions_on_passable(
-            map_feat[0],
-            recent_self_path,
-            gx0=gx0,
-            gy0=gy0,
-        )
-
         # 第二层：monster mask
         # 规则：
         # - 视野内：用精确位置
@@ -1511,14 +1469,11 @@ class Preprocessor:
         )
 
         # final step reward vector
-        dist_shaping_norm_weight = 12.8
-
-        in_stage2 = self.curriculum_episode >= CURRICULUM_STAGE2_EPISODE
-        survival_weight = SURVIVAL_WEIGHT_STAGE2 if in_stage2 else SURVIVAL_WEIGHT_STAGE1
+        dist_shaping_norm_weight = 12.8 
 
         reward_vector = [
-            0.30 * score_gain,
-            0.30 * survival_weight * survive_phase_weight * survive_reward,
+            0.40 * score_gain,
+            0.20 * survive_phase_weight * survive_reward,
             0.50 * los_break_reward,
             0.25 * flash_reward,
             0.20 * near_wall_penalty,
@@ -1526,7 +1481,7 @@ class Preprocessor:
             0.30 * danger_penalty,
             0.30 * dist_shaping_norm_weight * treasure_dist_reward,
             0.30 * dist_shaping_norm_weight * buff_dist_reward,
-            survival_weight * buff_pick_reward,
+            buff_pick_reward,
             abs(1.50 * dist_shaping_norm_weight * monster_dist_reward),
         ]
 
