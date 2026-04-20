@@ -1153,7 +1153,7 @@ class Preprocessor:
         env_info = observation["env_info"]
         map_info = observation["map_info"]
         legal_act_raw = observation["legal_action"]
-        self.logger.warning(f"legal_action: {legal_act_raw}")
+        # self.logger.warning(f"legal_action: {legal_act_raw}")
 
         self.step_no = observation["step_no"]
         self.max_step = env_info.get("max_step", 200)
@@ -1487,7 +1487,7 @@ class Preprocessor:
         )
 
         # buff 奖励
-        monster_goingto_speedup = bool(reward_feats['progress_feats'][3] < 100)
+        monster_goingto_speedup = bool(reward_feats['progress_feats'][3] < 0.2)
 
         collected_buff = int(env_info.get("collected_buff", self.last_collected_buff))
         buff_delta = float(max(0, collected_buff - self.last_collected_buff))
