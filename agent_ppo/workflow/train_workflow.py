@@ -20,7 +20,8 @@ from tools.metrics_utils import get_training_metrics
 from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
 
-CURRICULUM_STAGE2_EPISODE = 2500
+CURRICULUM_EASY_EPISODE = 300
+CURRICULUM_HARD_EPISODE = 2500
 
 def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     last_save_model_time = time.time()
@@ -130,6 +131,16 @@ class EpisodeRunner:
         if not isinstance(env_conf, dict):
             return train_conf
 
+        if episode_cnt <= CURRICULUM_EASY_EPISODE:
+            env_conf["monster_interval"] = 700
+            env_conf["monster_speedup"] = 900
+        elif episode_cnt < CURRICULUM_HARD_EPISODE:
+            env_conf["monster_interval"] = 500
+            env_conf["monster_speedup"] = 700
+        else:
+            env_conf["monster_interval"] = 300
+            env_conf["monster_speedup"] = 500
+
         map_ids = list(env_conf.get("map", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
         # if episode_cnt < CURRICULUM_STAGE2_EPISODE:
         #     return train_conf
@@ -192,7 +203,6 @@ class EpisodeRunner:
                 "r_flash_sum",
                 "r_wall_penalty_sum",
                 "r_abb_penalty_sum",
-                "r_exploration_sum",
                 "r_danger_penalty_sum",
                 "r_treasure_dist_sum",
                 "r_buff_dist_sum",

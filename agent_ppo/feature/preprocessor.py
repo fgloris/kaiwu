@@ -205,6 +205,9 @@ class Preprocessor:
         self.last_total_score = 0.0
         self.last_flash_count = 0
         self.last_is_dangerous = False
+        self.last_hero_pos = None
+        self.last_near_wall_penalty = 0.0
+        self.last_abb_score = None
 
         self.pos_history = deque(maxlen=8)
         self.abb_safe_score = 4.0
@@ -422,6 +425,93 @@ class Preprocessor:
         elif min_dist <= 3.0 + 1e-6:
             return -np.exp(-np.log(5.0) * (min_dist - 1.0))
         return 0.0
+
+    def _segment_crosses_known_wall(self, start_pos, end_pos):
+        if start_pos is None or end_pos is None:
+            return False
+
+        sx, sz = int(start_pos[0]), int(start_pos[1])
+        ex, ez = int(end_pos[0]), int(end_pos[1])
+        dx = ex - sx
+        dz = ez - sz
+        steps = max(abs(dx), abs(dz))
+        if steps <= 1:
+            return False
+
+        for t in range(1, steps):
+            alpha = t / float(steps)
+            x = int(round(sx + dx * alpha))
+            z = int(round(sz + dz * alpha))
+            if self._is_known_wall(x, z):
+                return True
+        return False
+
+    def _compute_flash_reward(
+        self,
+        flash_count_delta,
+        last_action,
+        cur_hero_pos,
+        monster_dist_reward,
+        prev_is_dangerous,
+        cur_is_dangerous,
+        near_wall_penalty,
+        abb_score,
+        m1,
+        m2,
+        second_exists,
+    ):
+        flash_selected = 8 <= int(last_action) < 16
+        flash_succeeded = flash_count_delta > 0
+        if not flash_selected and not flash_succeeded:
+            return 0.0
+
+        prev_pos = self.last_hero_pos
+        move_dist = 0.0
+        if prev_pos is not None and cur_hero_pos is not None:
+            move_dist = float(np.hypot(cur_hero_pos[0] - prev_pos[0], cur_hero_pos[1] - prev_pos[1]))
+
+        if flash_selected and not flash_succeeded:
+            return -2.0
+
+        monster_visible = bool(m1[0] > 1e-6) or bool(second_exists and m2[0] > 1e-6)
+        nearest_monster_dist = min(float(m1[4]), float(m2[4]) if second_exists else 1.0)
+        tactical_context = bool(prev_is_dangerous or cur_is_dangerous or monster_visible or nearest_monster_dist < 0.55)
+
+        reward = 0.4 if tactical_context else -0.8
+
+        if move_dist < 2.0:
+            reward -= 2.0
+        elif move_dist >= 5.0:
+            reward += min(1.2, move_dist / 10.0)
+
+        if monster_dist_reward > 0.0:
+            reward += min(3.0, 12.8 * float(monster_dist_reward))
+        else:
+            reward += max(-1.5, 8.0 * float(monster_dist_reward))
+
+        if prev_is_dangerous and not cur_is_dangerous:
+            reward += 2.0
+        elif cur_is_dangerous:
+            reward -= 1.0
+
+        if near_wall_penalty < self.last_near_wall_penalty:
+            reward -= min(1.5, abs(near_wall_penalty - self.last_near_wall_penalty))
+        elif near_wall_penalty > self.last_near_wall_penalty:
+            reward += min(1.0, near_wall_penalty - self.last_near_wall_penalty)
+
+        if self.last_abb_score is not None:
+            if abb_score > self.last_abb_score:
+                reward += min(1.0, (abb_score - self.last_abb_score) / max(self.abb_safe_score, 1e-6))
+            elif abb_score < self.last_abb_score:
+                reward -= min(1.0, (self.last_abb_score - abb_score) / max(self.abb_safe_score, 1e-6))
+
+        if self._segment_crosses_known_wall(prev_pos, cur_hero_pos):
+            reward += 1.2
+
+        if near_wall_penalty <= -0.8:
+            reward -= 1.0
+
+        return float(np.clip(reward, -4.0, 6.0))
 
     def _ray_collision_score(self, start_x, start_z, angle_deg, max_len=VIEW_MAP_SIZE/2, step_size=1.0):
         """
@@ -1362,20 +1452,10 @@ class Preprocessor:
         
         # 局势相关 reward settings
         cur_is_dangerous = bool(reward_feats.get("is_dangerous", False))
-        danger_to_safe_reward = 1.0 if (self.last_is_dangerous and (not cur_is_dangerous)) else 0.0
+        prev_is_dangerous = self.last_is_dangerous
         danger_penalty = -1.0 if cur_is_dangerous else 0.0
-        self.last_is_dangerous = cur_is_dangerous
 
-        # 闪现释放奖励：仅当“危险 -> 不危险”时给大分
-        flash_reward = 0.0
-        flash_count = env_info.get("flash_count", 0)
-        if (flash_count - self.last_flash_count) > 0:
-            if danger_to_safe_reward > 0.0:
-                flash_reward = 3.0
-            else:
-                flash_reward = -0.5
-        self.last_flash_count = flash_count
-
+        # Flash reward is handled after wall and safety signals are computed.
         connected_boundary_clusters = reward_feats.get("connected_boundary_clusters", [])
         last_action = reward_feats.get("last_action", -1)
 
@@ -1390,6 +1470,22 @@ class Preprocessor:
 
         abb_score, abb_penalty = self._compute_abb_penalty(cur_hero_pos)
 
+        flash_count = int(env_info.get("flash_count", self.last_flash_count))
+        flash_count_delta = max(0, flash_count - self.last_flash_count)
+        flash_reward = self._compute_flash_reward(
+            flash_count_delta=flash_count_delta,
+            last_action=last_action,
+            cur_hero_pos=cur_hero_pos,
+            monster_dist_reward=monster_dist_reward,
+            prev_is_dangerous=prev_is_dangerous,
+            cur_is_dangerous=cur_is_dangerous,
+            near_wall_penalty=near_wall_penalty,
+            abb_score=abb_score,
+            m1=m1,
+            m2=m2,
+            second_exists=second_exists,
+        )
+
         # buff 奖励
         monster_goingto_speedup = bool(reward_feats['progress_feats'][3] < 100)
 
@@ -1397,12 +1493,6 @@ class Preprocessor:
         buff_delta = float(max(0, collected_buff - self.last_collected_buff))
         self.last_collected_buff = collected_buff
         buff_pick_reward = buff_delta * (40.0 if monster_goingto_speedup else 20.0)
-
-        # 探索奖励
-        newly_discovered_passable_count = reward_feats.get("newly_discovered_passable_count", 0)
-        if self.step_no <= 1:
-            explore_reward = 0.0
-        else: explore_reward = _norm(newly_discovered_passable_count, 40.0)
 
         # 生存奖励
         survive_phase_weight = 1.00 + (self.step_no / 200)
@@ -1423,14 +1513,6 @@ class Preprocessor:
         # final step reward vector
         dist_shaping_norm_weight = 12.8
 
-        exploration_rate = 1.0
-        if cur_invisible_1 and cur_invisible_2:
-            exploration_rate = 2.0
-        else:
-            exploration_rate = 0.1
-
-        exploration_rate *= (2.0 if (not cur_is_dangerous) else 0.1)
-
         in_stage2 = self.curriculum_episode >= CURRICULUM_STAGE2_EPISODE
         survival_weight = SURVIVAL_WEIGHT_STAGE2 if in_stage2 else SURVIVAL_WEIGHT_STAGE1
 
@@ -1441,12 +1523,17 @@ class Preprocessor:
             0.25 * flash_reward,
             0.20 * near_wall_penalty,
             0.20 * abb_penalty,
-            0.10 * exploration_rate * explore_reward,
             0.30 * danger_penalty,
             0.30 * dist_shaping_norm_weight * treasure_dist_reward,
             0.30 * dist_shaping_norm_weight * buff_dist_reward,
             survival_weight * buff_pick_reward,
             abs(1.50 * dist_shaping_norm_weight * monster_dist_reward),
         ]
+
+        self.last_flash_count = flash_count
+        self.last_is_dangerous = cur_is_dangerous
+        self.last_hero_pos = cur_hero_pos
+        self.last_near_wall_penalty = near_wall_penalty
+        self.last_abb_score = abb_score
 
         return reward_vector, sum(reward_vector[:-1]) + 1.50 * dist_shaping_norm_weight * monster_dist_reward
