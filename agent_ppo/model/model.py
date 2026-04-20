@@ -65,8 +65,7 @@ class Model(nn.Module):
 
         self.map_stage1 = nn.Sequential(
             ResidualBlock(32, dropout_p=self.map_dropout_p),
-            ResidualBlock(32, dropout_p=self.map_dropout_p),
-            nn.MaxPool2d(2),   # 36 -> 18
+            nn.MaxPool2d(2),   # 21 -> 10
         )
 
         self.map_stage2 = nn.Sequential(
@@ -74,8 +73,7 @@ class Model(nn.Module):
             nn.ReLU(),
             nn.Dropout2d(self.map_dropout_p),
             ResidualBlock(64, dropout_p=self.map_dropout_p),
-            ResidualBlock(64, dropout_p=self.map_dropout_p),
-            nn.MaxPool2d(2),   # 18 -> 9
+            nn.MaxPool2d(2),   # 10 -> 5
         )
         nn.init.orthogonal_(self.map_stage2[0].weight.data)
         nn.init.zeros_(self.map_stage2[0].bias.data)
