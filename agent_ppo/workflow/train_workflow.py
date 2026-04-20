@@ -139,7 +139,7 @@ class EpisodeRunner:
         if not focus_maps:
             return train_conf
 
-        if np.random.rand() < 0.6 or not other_maps:
+        if np.random.rand() < 0.4 or not other_maps:
             chosen_map = int(np.random.choice(focus_maps))
         else:
             chosen_map = int(np.random.choice(other_maps))
