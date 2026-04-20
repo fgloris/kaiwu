@@ -20,8 +20,8 @@ from tools.metrics_utils import get_training_metrics
 from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
 
-CURRICULUM_EASY_EPISODE = 300
-CURRICULUM_HARD_EPISODE = 2500
+CURRICULUM_EASY_EPISODE = 1000
+CURRICULUM_HARD_EPISODE = 3000
 
 def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     last_save_model_time = time.time()
