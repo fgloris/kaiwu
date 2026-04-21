@@ -208,7 +208,6 @@ class Preprocessor:
         self.last_hero_pos = None
         self.last_connected_opening_count = 0
         self.last_monster_to_agent_vecs = [None, None]
-        self.last_monster_line_blocked = [None, None]
         self.last_monster_dist_grid = [None, None]
         self.last_unique_boundary_cluster = None
 
@@ -1501,10 +1500,10 @@ class Preprocessor:
         )
         cur_unique_boundary_cluster = self._unique_boundary_cluster_info(reward_feats)
 
-        made_wall_between_monster = False
+        wall_escape_from_dead_end = False
         for i in range(active_monster_count):
-            if self.last_monster_line_blocked[i] is False and cur_monster_line_blocked[i] is True:
-                made_wall_between_monster = True
+            if last_opening_count <= 1 and crossed_wall and cur_monster_line_blocked[i] is True:
+                wall_escape_from_dead_end = True
                 break
 
         single_close_monster = (
@@ -1546,7 +1545,7 @@ class Preprocessor:
 
         flash_reward = 0.0
         if used_flash:
-            if crossed_wall and made_wall_between_monster:
+            if wall_escape_from_dead_end:
                 flash_reward = 4.0
             elif single_monster_back_escape:
                 flash_reward = 3.0
@@ -1560,7 +1559,6 @@ class Preprocessor:
         self.last_hero_pos = cur_hero_pos
         self.last_connected_opening_count = cur_opening_count
         self.last_monster_to_agent_vecs = cur_monster_to_agent_vecs
-        self.last_monster_line_blocked = cur_monster_line_blocked
         self.last_monster_dist_grid = cur_monster_dist_grid
         self.last_unique_boundary_cluster = cur_unique_boundary_cluster
 
