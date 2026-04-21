@@ -14,7 +14,7 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 import json
 import numpy as np
 from collections import deque
-from agent_ppo.feature.curriculum import CURRICULUM_REWARD_CONFIGS
+from agent_ppo.feature.curriculum import REWARD_CONFIG
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
@@ -22,11 +22,6 @@ MAP_SIZE_INT = 128
 LOCAL_MAP_SIZE = 21
 LOCAL_MAP_HALF = 10
 VIEW_MAP_SIZE = 21
-
-# 多级课程学习阶段定义
-CURRICULUM_STAGE_1_END = 800
-CURRICULUM_STAGE_2_END = 1800
-CURRICULUM_STAGE_3_END = 3000
 
 # Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 2.0
@@ -67,12 +62,8 @@ DIR8 = [
 SCAN_ANGLES_DEG = list(range(0, 360, 15))
 
 
-def _get_curriculum_reward_config(episode):
-    episode = int(max(0, episode))
-    for config in CURRICULUM_REWARD_CONFIGS:
-        if config.episode_end < 0 or episode < config.episode_end:
-            return config
-    return CURRICULUM_REWARD_CONFIGS[-1]
+def _get_reward_config():
+    return REWARD_CONFIG
 
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
@@ -1593,7 +1584,7 @@ class Preprocessor:
         dist_shaping_norm_weight = 12.8
 
         # ============== 最终奖励向量 ==============
-        reward_config = _get_curriculum_reward_config(self.curriculum_episode)
+        reward_config = _get_reward_config()
         reward_vector = [
             reward_config.score_gain * score_gain,
             reward_config.survival * reward_config.survival_multiplier * survive_phase_weight * survive_reward,

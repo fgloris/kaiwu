@@ -45,8 +45,3 @@ class Config:
     CLIP_PARAM = 0.2
     VF_COEF = 1.0
     GRAD_CLIP_RANGE = 0.5
-
-    # ============== Reward curriculum config ==============
-    CURRICULUM_STAGE_1_END = 800     # 入门阶段结束
-    CURRICULUM_STAGE_2_END = 1800    # 成长阶段结束
-    CURRICULUM_STAGE_3_END = 3000    # 高级阶段结束
