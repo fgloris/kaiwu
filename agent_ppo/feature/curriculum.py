@@ -6,7 +6,7 @@ class RewardConfig:
     stage: int
     name: str
     episode_end: int
-    score_gain: float
+    treasure_score_gain: float
     survival: float
     los_break: float
     flash: float
@@ -25,7 +25,7 @@ REWARD_CONFIG = RewardConfig(
     stage=3,
     name="advanced",
     episode_end=-1,
-    score_gain=0.25,
+    treasure_score_gain=0.25,
     survival=0.35,
     los_break=0.50,
     flash=0.25,

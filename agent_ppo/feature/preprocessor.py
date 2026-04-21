@@ -202,7 +202,7 @@ class Preprocessor:
         self.last_monster_invisible_1 = False
         self.last_monster_invisible_2 = False
 
-        self.last_total_score = 0.0
+        self.last_treasure_score = 0.0
         self.last_flash_count = 0
         self.last_is_dangerous = False
         self.last_hero_pos = None
@@ -359,6 +359,14 @@ class Preprocessor:
             if not angle > angle_threshold:
                 return False
         return True
+
+    def _nearest_monster_grid_distance(self, monster_feats, active_monster_count):
+        dists = []
+        for monster_feat in monster_feats[:active_monster_count]:
+            rel_x = float(monster_feat[2]) * MAP_SIZE
+            rel_z = float(monster_feat[3]) * MAP_SIZE
+            dists.append(float(np.hypot(rel_x, rel_z)))
+        return min(dists) if dists else None
 
     def _parse_legal_action_raw(self, legal_act_raw):
         """Parse env legal_action into a 16D binary mask."""
@@ -1343,14 +1351,13 @@ class Preprocessor:
         # 3.尽量不要撞墙。1.不要撞侧面的墙。2.不要走进死胡同。              --> 计算路径方向？
         # 4.不要原地打转。                                               --> ABB惩罚？好像做不到。方向一致性惩罚？
 
-        # 基于比赛分数增量的奖励
+        # 基于宝箱分数增量的奖励
         env_info = env_obs["observation"].get("env_info", {})
-        cur_total_score = float(env_info.get("total_score", 0.0))
-        score_gain = cur_total_score - self.last_total_score
-        self.last_total_score = cur_total_score
+        cur_treasure_score = float(env_info.get("treasure_score", 0.0))
+        treasure_score_gain = cur_treasure_score - self.last_treasure_score
+        self.last_treasure_score = cur_treasure_score
         
         # 怪物 dist shaping
-        
         second_exists = bool(reward_feats['progress_feats'][2] < 1e-6)
 
         monster_dist_reward = 0.0
@@ -1358,6 +1365,18 @@ class Preprocessor:
 
         m1 = reward_feats['monster_feats'][0]
         m2 = reward_feats['monster_feats'][1]
+        active_monster_count = min(2, max(0, int(reward_feats.get("monster_feats_available", 0))))
+        nearest_monster_grid_dist = self._nearest_monster_grid_distance(
+            reward_feats["monster_feats"],
+            active_monster_count,
+        )
+        monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
+        is_monster_speedup = monster_speedup_step > 0 and self.step_no >= monster_speedup_step
+        monster_near_threshold = 8.0 if is_monster_speedup else 4.0
+        is_monster_near = (
+            nearest_monster_grid_dist is not None
+            and nearest_monster_grid_dist <= monster_near_threshold
+        )
         r1 = 0.0
         r2 = 0.0
 
@@ -1465,29 +1484,37 @@ class Preprocessor:
         buff_pick_reward = buff_delta * (40.0 if monster_goingto_speedup else 20.0)
 
         # 生存奖励
-        survive_phase_weight = 1.00 + (self.step_no / 200)
-        survive_reward = 1.00
+        survive_reward = 1.00 + (self.step_no / 200)
         if abb_score < self.abb_safe_score:
             survive_reward = 0.0
             los_break_reward = min(los_break_reward, 0.0)
 
+        # treasure dist reward
         treasure_dist_reward = self._compute_positive_dist_shaping(
             reward_feats.get("nearest_treasure_dist_norm", -1.0),
             "last_treasure_dist_norm",
         )
+
+        # buff dist reward
         buff_dist_reward = 0.4 * self._compute_positive_dist_shaping(
             reward_feats.get("nearest_buff_dist_norm", -1.0),
             "last_buff_dist_norm",
         )
 
+        # treasure score gain is ignored while a monster is too close.
+        if is_monster_near:
+            treasure_score_gain = 0.0
+            treasure_dist_reward = 0.0
+
         # final step reward vector
         dist_shaping_norm_weight = 12.8
 
         # ============== 最终奖励向量 ==============
+
         reward_config = _get_reward_config()
         reward_vector = [
-            reward_config.score_gain * score_gain,
-            reward_config.survival * reward_config.survival_multiplier * survive_phase_weight * survive_reward,
+            reward_config.treasure_score_gain * treasure_score_gain,
+            reward_config.survival * reward_config.survival_multiplier * survive_reward,
             reward_config.los_break * los_break_reward,
             reward_config.flash * flash_reward,
             reward_config.wall_penalty * near_wall_penalty,
