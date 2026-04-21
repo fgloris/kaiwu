@@ -208,8 +208,6 @@ class Preprocessor:
         self.last_hero_pos = None
         self.last_connected_opening_count = 0
         self.last_monster_to_agent_vecs = [None, None]
-        self.last_monster_dist_grid = [None, None]
-        self.last_unique_boundary_cluster = None
 
         self.pos_history = deque(maxlen=8)
         self.abb_safe_score = 4.0
@@ -217,7 +215,8 @@ class Preprocessor:
         self.last_treasure_dist_norm = -1.0
         self.last_buff_dist_norm = -1.0
 
-        # 全局物件记忆：只保留 buff，宝箱不会刷新，直接用当前帧 organs
+        # 全局物件记忆
+        self.treasure_memory = {}
         self.buff_memory = {}
         self.last_collected_buff = 0
         self.buff_refresh_time = 200
@@ -318,6 +317,8 @@ class Preprocessor:
             return True  # 出界直接视为墙，更保守
         return bool(self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0)
 
+        return bool(self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0)
+
     def _did_segment_cross_known_wall(self, start_pos, end_pos):
         if start_pos is None or end_pos is None:
             return False
@@ -358,45 +359,6 @@ class Preprocessor:
             if angle > angle_threshold:
                 return True
         return False
-
-    def _monster_position_from_feat(self, hero_pos, monster_feat):
-        if hero_pos is None or monster_feat is None:
-            return None
-        hero_x, hero_z = float(hero_pos[0]), float(hero_pos[1])
-        rel_x = float(monster_feat[2]) * MAP_SIZE
-        rel_z = float(monster_feat[3]) * MAP_SIZE
-        return hero_x + rel_x, hero_z + rel_z
-
-    def _monster_distance_grid_from_feat(self, monster_feat):
-        if monster_feat is None:
-            return None
-        rel_x = float(monster_feat[2]) * MAP_SIZE
-        rel_z = float(monster_feat[3]) * MAP_SIZE
-        return float(np.hypot(rel_x, rel_z))
-
-    def _line_to_monster_has_known_wall(self, hero_pos, monster_feat):
-        monster_pos = self._monster_position_from_feat(hero_pos, monster_feat)
-        if hero_pos is None or monster_pos is None:
-            return None
-        return self._did_segment_cross_known_wall(monster_pos, hero_pos)
-
-    def _unique_boundary_cluster_info(self, reward_feats):
-        clusters = reward_feats.get("connected_boundary_clusters", [])
-        hero_pos = reward_feats.get("hero_pos")
-        if len(clusters) != 1 or hero_pos is None:
-            return None
-
-        center = clusters[0].get("center")
-        if center is None:
-            return None
-
-        gx = float(hero_pos[0]) - LOCAL_MAP_HALF + float(center[0])
-        gz = float(hero_pos[1]) - LOCAL_MAP_HALF + float(center[1])
-        dist = float(np.hypot(gx - float(hero_pos[0]), gz - float(hero_pos[1])))
-        return {
-            "pos": (gx, gz),
-            "dist": dist,
-        }
 
     def _parse_legal_action_raw(self, legal_act_raw):
         """Parse env legal_action into a 16D binary mask."""
@@ -924,13 +886,29 @@ class Preprocessor:
 
     def _update_organ_memory(self, env_info, organs, hero_pos):
         """
-        Buff memory 更新规则。
-        宝箱不会刷新，不进入全局记忆，特征直接来自当前帧 organs。
-        Buff 会刷新，所以保留全局位置、可用状态和 respawn_step。
+        organ memory 更新规则：
+
+        1. 当前 organs 里出现的新 id：
+        - 加入 memory
+        - available = status
+        - buff 的 respawn_step = -1
+
+        2. 当前 organs 里出现的旧 id：
+        - 刷新位置
+        - available = status
+        - buff 的 respawn_step = -1
+
+        3. 对所有 memory 中“位置在当前 21x21 视野内，但本帧没出现在 organs 里”的物体：
+        - 若 available 原本为 True，则置 False
+        - 若是 buff，同时写 respawn_step = step_no + buff_refresh_time
+
+        4. 对所有 buff：
+        - 若 respawn_step 到时，则 available = True, respawn_step = -1
         """
         self.buff_refresh_time = int(env_info.get("buff_refresh_time", self.buff_refresh_time))
 
         # 当前帧在视野内真正出现过的 id
+        visible_treasure_ids = set()
         visible_buff_ids = set()
 
         # 1) 先处理当前 organs：出现了就记为 available=True
@@ -945,7 +923,17 @@ class Preprocessor:
             z = int(pos.get("z", 0))
             available = bool(organ.get("status", 1) == 1)
 
-            if sub_type == 2:
+            if sub_type == 1:
+                visible_treasure_ids.add(config_id)
+
+                mem = self.treasure_memory.setdefault(
+                    config_id,
+                    {"pos": (x, z), "available": available}
+                )
+                mem["pos"] = (x, z)
+                mem["available"] = available
+
+            elif sub_type == 2:
                 visible_buff_ids.add(config_id)
 
                 mem = self.buff_memory.setdefault(
@@ -956,7 +944,16 @@ class Preprocessor:
                 mem["available"] = available
                 mem["respawn_step"] = -1
 
-        # 2) buff: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable，并启动 respawn
+        # 2) treasure: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable
+        for tid, mem in self.treasure_memory.items():
+            if not self._is_in_current_view(mem["pos"], hero_pos):
+                continue
+            if tid in visible_treasure_ids:
+                continue
+            if mem.get("available", False):
+                mem["available"] = False
+
+        # 3) buff: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable，并启动 respawn
         for bid, mem in self.buff_memory.items():
             if not self._is_in_current_view(mem["pos"], hero_pos):
                 continue
@@ -966,7 +963,7 @@ class Preprocessor:
                 mem["available"] = False
                 mem["respawn_step"] = self.step_no + self.buff_refresh_time
 
-        # 3) buff 到刷新时间则重新可用
+        # 4) buff 到刷新时间则重新可用
         for mem in self.buff_memory.values():
             respawn_step = int(mem.get("respawn_step", -1))
             if respawn_step >= 0 and self.step_no >= respawn_step:
@@ -1016,50 +1013,6 @@ class Preprocessor:
                 break
 
         return np.concatenate(feat_list, axis=0), items, best_dist_norm
-
-    def _build_current_treasure_features(self, hero_pos, organs):
-        hero_x = int(hero_pos["x"])
-        hero_z = int(hero_pos["z"])
-        items = []
-
-        for organ in organs:
-            if int(organ.get("sub_type", 0)) != 1:
-                continue
-            if int(organ.get("status", 0)) != 1:
-                continue
-
-            config_id = int(organ.get("config_id", -1))
-            pos = organ.get("pos", {}) or {}
-            x = int(pos.get("x", -1))
-            z = int(pos.get("z", -1))
-            if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
-                continue
-
-            dx = float(x - hero_x)
-            dz = float(z - hero_z)
-            dist = float(np.hypot(dx, dz))
-            dir_x = dx / dist if dist > 1e-6 else 0.0
-            dir_z = dz / dist if dist > 1e-6 else 0.0
-            dist_norm = _norm(dist, MAP_SIZE * 1.41)
-            items.append({
-                "id": config_id,
-                "pos": (x, z),
-                "available": True,
-                "dist": dist,
-                "dist_norm": dist_norm,
-                "feat": np.array([
-                    np.clip(dir_x, -1.0, 1.0),
-                    np.clip(dir_z, -1.0, 1.0),
-                    dist_norm,
-                    1.0,
-                ], dtype=np.float32),
-            })
-
-        items.sort(key=lambda x: x["dist"])
-        if not items:
-            return np.zeros(4, dtype=np.float32), items, -1.0
-
-        return items[0]["feat"], items, float(items[0]["dist_norm"])
 
     def _compute_positive_dist_shaping(self, cur_dist_norm, last_attr_name):
         if cur_dist_norm < 0:
@@ -1234,8 +1187,8 @@ class Preprocessor:
 
         organs = frame_state.get("organs", [])
         self._update_organ_memory(env_info, organs, hero_pos)
-        treasure_feat, treasure_items, nearest_treasure_dist_norm = self._build_current_treasure_features(
-            hero_pos, organs
+        treasure_feat, treasure_items, nearest_treasure_dist_norm = self._build_target_features(
+            hero_pos, self.treasure_memory, topk=2, prefer_available_only=True
         )
         buff_feat, buff_items, nearest_buff_dist_norm = self._build_target_features(
             hero_pos, self.buff_memory, topk=2, prefer_available_only=False
@@ -1472,85 +1425,28 @@ class Preprocessor:
         # abb 惩罚项
         abb_score, abb_penalty = self._compute_abb_penalty(cur_hero_pos)
         
-        # flash 奖励
         # 闪现只奖励受困追逃局势下的有效逃生，非受困乱闪会被惩罚。
         flash_reward = 0.0
 
         flash_count = int(env_info.get("flash_count", self.last_flash_count))
         used_flash = (flash_count - self.last_flash_count) > 0
-        monster_count = int(reward_feats.get("monster_feats_available", 0))
-        active_monster_count = min(2, max(0, monster_count))
-        cur_monster_feats = [m1, m2]
-        cur_monster_line_blocked = [
-            self._line_to_monster_has_known_wall(cur_hero_pos, cur_monster_feats[i]) if i < active_monster_count else None
-            for i in range(2)
-        ]
-        cur_monster_dist_grid = [
-            self._monster_distance_grid_from_feat(cur_monster_feats[i]) if i < active_monster_count else None
-            for i in range(2)
-        ]
-        cur_monster_to_agent_vecs = [
-            self._monster_to_agent_vector(cur_monster_feats[i]) if i < active_monster_count else None
-            for i in range(2)
-        ]
+        danger_decreased = last_opening_count <= 1 and cur_opening_count > 1
         crossed_wall = used_flash and self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
-        crossed_monster = used_flash and self._did_cross_monster_by_angle(
+        cur_monster_to_agent_vecs = [
+            self._monster_to_agent_vector(m1),
+            self._monster_to_agent_vector(m2) if second_exists else None,
+        ]
+        crossed_monster = used_flash and last_opening_count <= 1 and self._did_cross_monster_by_angle(
             cur_monster_to_agent_vecs,
             angle_threshold=150.0,
         )
-        cur_unique_boundary_cluster = self._unique_boundary_cluster_info(reward_feats)
-
-        wall_escape_from_dead_end = False
-        for i in range(active_monster_count):
-            if last_opening_count <= 1 and crossed_wall and cur_monster_line_blocked[i] is True:
-                wall_escape_from_dead_end = True
-                break
-
-        single_close_monster = (
-            active_monster_count == 1
-            and self.last_monster_dist_grid[0] is not None
-            and self.last_monster_dist_grid[0] <= 2.0
-        )
-        closer_to_last_unique_cluster = False
-        if self.last_unique_boundary_cluster is not None and cur_hero_pos is not None:
-            cluster_pos = self.last_unique_boundary_cluster["pos"]
-            cur_cluster_dist = float(np.hypot(cluster_pos[0] - cur_hero_pos[0], cluster_pos[1] - cur_hero_pos[1]))
-            closer_to_last_unique_cluster = cur_cluster_dist + 1e-6 < float(self.last_unique_boundary_cluster["dist"])
-
-        single_monster_back_escape = (
-            single_close_monster
-            and last_opening_count <= 1
-            and crossed_monster
-            and (cur_opening_count > last_opening_count or closer_to_last_unique_cluster)
-        )
-
-        last_nearest_monster_dist = None
-        cur_nearest_monster_dist = None
-        last_valid_dists = [d for d in self.last_monster_dist_grid[:active_monster_count] if d is not None]
-        cur_valid_dists = [d for d in cur_monster_dist_grid[:active_monster_count] if d is not None]
-        if last_valid_dists:
-            last_nearest_monster_dist = min(last_valid_dists)
-        if cur_valid_dists:
-            cur_nearest_monster_dist = min(cur_valid_dists)
-
-        near_monster_escape_reward = 0.0
-        if (
-            last_nearest_monster_dist is not None
-            and cur_nearest_monster_dist is not None
-            and last_nearest_monster_dist <= 2.0
-            and cur_nearest_monster_dist > last_nearest_monster_dist
-        ):
-            dist_gain = cur_nearest_monster_dist - last_nearest_monster_dist
-            near_monster_escape_reward = min(4.0, 1.0 + 0.5 * dist_gain)
 
         flash_reward = 0.0
         if used_flash:
-            if wall_escape_from_dead_end:
+            if danger_decreased and crossed_wall:
                 flash_reward = 4.0
-            elif single_monster_back_escape:
+            elif crossed_monster:
                 flash_reward = 3.0
-            elif near_monster_escape_reward > 0.0:
-                flash_reward = near_monster_escape_reward
             else:
                 flash_reward = -1.0
 
@@ -1559,8 +1455,6 @@ class Preprocessor:
         self.last_hero_pos = cur_hero_pos
         self.last_connected_opening_count = cur_opening_count
         self.last_monster_to_agent_vecs = cur_monster_to_agent_vecs
-        self.last_monster_dist_grid = cur_monster_dist_grid
-        self.last_unique_boundary_cluster = cur_unique_boundary_cluster
 
         # buff 奖励
         monster_goingto_speedup = bool(reward_feats['progress_feats'][3] < 100)
