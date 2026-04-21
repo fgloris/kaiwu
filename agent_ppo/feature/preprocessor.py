@@ -25,8 +25,10 @@ VIEW_MAP_SIZE = 21
 
 # Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 2.0
-# Max distance bucket / 距离桶最大值
-MAX_DIST_BUCKET = 5.0
+# Monster distance bucket / 怪物距离桶
+MONSTER_DIST_BUCKET_MAX = 7.0
+MONSTER_DIST_BUCKET_EDGES = (0.0, 4.0, 10.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0)
+OLD_MONSTER_DIST_BUCKET_MAX = 5
 # Max flash cooldown / 最大闪现冷却步数
 MAX_FLASH_CD = 200.0
 # Max buff duration / buff最大持续时间
@@ -120,6 +122,26 @@ def _distance_bucket_to_radius(dist_bucket):
         5: 165.0,
     }
     return bucket_mid[dist_bucket]
+
+def _monster_dist_bucket_norm_from_raw(dist):
+    dist = float(np.clip(dist, MONSTER_DIST_BUCKET_EDGES[0], MONSTER_DIST_BUCKET_EDGES[-1]))
+    bucket_idx = len(MONSTER_DIST_BUCKET_EDGES) - 2
+    for i in range(len(MONSTER_DIST_BUCKET_EDGES) - 1):
+        left = MONSTER_DIST_BUCKET_EDGES[i]
+        right = MONSTER_DIST_BUCKET_EDGES[i + 1]
+        if i == len(MONSTER_DIST_BUCKET_EDGES) - 2:
+            if left <= dist <= right:
+                bucket_idx = i
+                break
+        elif left <= dist < right:
+            bucket_idx = i
+            break
+    return float(bucket_idx) / MONSTER_DIST_BUCKET_MAX
+
+def _monster_dist_bucket_norm_from_env_bucket(old_bucket):
+    old_bucket = int(np.clip(old_bucket, 0, OLD_MONSTER_DIST_BUCKET_MAX))
+    new_bucket = old_bucket + 2
+    return float(new_bucket) / MONSTER_DIST_BUCKET_MAX
 
 def _estimate_monster_pos(hero_x, hero_z, monster):
     """
@@ -1164,7 +1186,9 @@ class Preprocessor:
                 dir_idx = int(m.get("hero_relative_direction", 0))
                 dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
 
-                dist_norm = _norm(m.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET)
+                dist_norm = _monster_dist_bucket_norm_from_env_bucket(
+                    m.get("hero_l2_distance", OLD_MONSTER_DIST_BUCKET_MAX)
+                )
 
                 if is_in_view:
                     m_pos = m["pos"]
@@ -1176,7 +1200,7 @@ class Preprocessor:
                     rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
 
                     raw_dist = np.sqrt(dx * dx + dz * dz)
-                    dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 10)
+                    dist_norm = _monster_dist_bucket_norm_from_raw(raw_dist)
 
                     # 视野内时，用连续方向覆盖离散方向
                     if raw_dist > 1e-6:
