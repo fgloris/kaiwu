@@ -368,6 +368,13 @@ class Preprocessor:
             dists.append(float(np.hypot(rel_x, rel_z)))
         return min(dists) if dists else None
 
+    def _is_monster_near(self, monster_feats, active_monster_count, env_info):
+        nearest_dist = self._nearest_monster_grid_distance(monster_feats, active_monster_count)
+        monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
+        is_speedup = monster_speedup_step > 0 and self.step_no >= monster_speedup_step
+        near_threshold = 8.0 if is_speedup else 4.0
+        return nearest_dist is not None and nearest_dist <= near_threshold
+
     def _parse_legal_action_raw(self, legal_act_raw):
         """Parse env legal_action into a 16D binary mask."""
         legal_action = [1] * 16
@@ -849,13 +856,11 @@ class Preprocessor:
             dir_scores /= total_connected_weight
 
         dir_scores = np.clip(dir_scores, 0.0, 1.0).astype(np.float32)
-        is_dangerous = len(connected_clusters) <= 1
         return dir_scores, {
             "boundary_pts": boundary_pts,
             "clusters": clusters,
             "connected_clusters": connected_clusters,
             "connected_opening_count": len(connected_clusters),
-            "is_dangerous": is_dangerous,
             "masked_local_passable": np.array(local_passable, copy=True),
         }
 
@@ -1304,10 +1309,13 @@ class Preprocessor:
         boundary_cluster_feat, boundary_cluster_info = self._compute_boundary_cluster_direction_scores(
             local_passable_21
         )
-        connected_opening_count = _norm(boundary_cluster_info["connected_opening_count"], 5)
-        is_dangerous = _norm(int(boundary_cluster_info["is_dangerous"]), 1)
+        connected_opening_count_raw = int(boundary_cluster_info["connected_opening_count"])
+        connected_opening_count = _norm(connected_opening_count_raw, 5)
+        active_monster_count = min(2, max(0, len(monsters)))
+        is_monster_near = self._is_monster_near(monster_feats, active_monster_count, env_info)
+        is_dangerous = bool(is_monster_near or connected_opening_count_raw <= 1)
         
-        situation_feat = np.array([connected_opening_count, is_dangerous], dtype=np.float32)
+        situation_feat = np.array([connected_opening_count, float(is_dangerous)], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         # 新增一组 8 维边缘连通簇方向特征，放在 ray collision 特征之后
@@ -1334,8 +1342,8 @@ class Preprocessor:
             "last_action": int(last_action),
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
             "connected_boundary_clusters": boundary_cluster_info["connected_clusters"],
-            "connected_opening_count": int(boundary_cluster_info["connected_opening_count"]),
-            "is_dangerous": bool(boundary_cluster_info["is_dangerous"]),
+            "connected_opening_count": connected_opening_count_raw,
+            "is_dangerous": is_dangerous,
             "nearest_treasure_dist_norm": float(nearest_treasure_dist_norm),
             "nearest_buff_dist_norm": float(nearest_buff_dist_norm),
         }
@@ -1366,20 +1374,14 @@ class Preprocessor:
         m1 = reward_feats['monster_feats'][0]
         m2 = reward_feats['monster_feats'][1]
         active_monster_count = min(2, max(0, int(reward_feats.get("monster_feats_available", 0))))
-        nearest_monster_grid_dist = self._nearest_monster_grid_distance(
+        is_monster_near = self._is_monster_near(
             reward_feats["monster_feats"],
             active_monster_count,
+            env_info,
         )
-        monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
-        is_monster_speedup = monster_speedup_step > 0 and self.step_no >= monster_speedup_step
-        monster_near_threshold = 8.0 if is_monster_speedup else 4.0
-        is_monster_near = (
-            nearest_monster_grid_dist is not None
-            and nearest_monster_grid_dist <= monster_near_threshold
-        )
+
         r1 = 0.0
         r2 = 0.0
-
         # monster 1
         if self.last_monster_dist_norm_1 >= 0:
             cur_dist_1 = float(m1[4])   # dist_norm
