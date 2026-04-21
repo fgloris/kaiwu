@@ -1451,13 +1451,13 @@ class Preprocessor:
 
         flash_count = int(env_info.get("flash_count", self.last_flash_count))
         used_flash = (flash_count - self.last_flash_count) > 0
-        danger_decreased = last_opening_count <= 1 and cur_opening_count > 1
+        danger_decreased = self.last_is_dangerous and cur_is_dangerous > 1
         crossed_wall = used_flash and self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
         cur_monster_to_agent_vecs = [
             self._monster_to_agent_vector(m1),
             self._monster_to_agent_vector(m2) if second_exists else None,
         ]
-        crossed_monster = used_flash and last_opening_count <= 1 and self._did_cross_monster_by_angle(
+        crossed_monster = used_flash and self.last_is_dangerous and self._did_cross_monster_by_angle(
             cur_monster_to_agent_vecs,
             angle_threshold=150.0,
         )
