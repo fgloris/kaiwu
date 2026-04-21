@@ -1476,6 +1476,13 @@ class Preprocessor:
         flash_count = int(env_info.get("flash_count", self.last_flash_count))
         used_flash = (flash_count - self.last_flash_count) > 0
         danger_decreased = self.last_is_dangerous and cur_is_dangerous > 1
+        flash_move_dist = None
+        if used_flash and self.last_hero_pos is not None and cur_hero_pos is not None:
+            flash_move_dist = float(np.hypot(
+                float(cur_hero_pos[0]) - float(self.last_hero_pos[0]),
+                float(cur_hero_pos[1]) - float(self.last_hero_pos[1]),
+            ))
+        flash_hit_wall = flash_move_dist is not None and flash_move_dist <= 5.0
         crossed_wall = used_flash and self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
         cur_monster_to_agent_vecs = [
             self._monster_to_agent_vector(m1),
@@ -1488,8 +1495,10 @@ class Preprocessor:
 
         flash_reward = 0.0
         if used_flash:
-            if danger_decreased and crossed_wall:
-                flash_reward = 4.0
+            if flash_hit_wall:
+                flash_reward = -4.0
+            elif danger_decreased and crossed_wall:
+                flash_reward = 8.0
             elif crossed_monster:
                 flash_reward = 8.0
             else:
