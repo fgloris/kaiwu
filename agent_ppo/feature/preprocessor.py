@@ -356,9 +356,9 @@ class Preprocessor:
                 continue
             cos_angle = float(np.clip(np.dot(last_vec, cur_vec), -1.0, 1.0))
             angle = float(np.degrees(np.arccos(cos_angle)))
-            if angle > angle_threshold:
-                return True
-        return False
+            if not angle > angle_threshold:
+                return False
+        return True
 
     def _parse_legal_action_raw(self, legal_act_raw):
         """Parse env legal_action into a 16D binary mask."""
@@ -1446,7 +1446,7 @@ class Preprocessor:
             if danger_decreased and crossed_wall:
                 flash_reward = 4.0
             elif crossed_monster:
-                flash_reward = 3.0
+                flash_reward = 8.0
             else:
                 flash_reward = -1.0
 
