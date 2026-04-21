@@ -109,6 +109,9 @@ def build_monitor():
         .add_metric(metrics_name="eval_12_total_score", expr="avg(eval_12_total_score{})")
         .add_metric(metrics_name="eval_12_treasure_score", expr="avg(eval_12_treasure_score{})")
         .add_metric(metrics_name="eval_12_step_score", expr="avg(eval_12_step_score{})")
+        .add_metric(metrics_name="eval_12_min_total_score", expr="avg(eval_12_min_total_score{})")
+        .add_metric(metrics_name="eval_12_min_treasure_score", expr="avg(eval_12_min_treasure_score{})")
+        .add_metric(metrics_name="eval_12_min_step_score", expr="avg(eval_12_min_step_score{})")
         .end_panel()
         .add_panel(
             name="测试地图9_10得分",
@@ -118,6 +121,9 @@ def build_monitor():
         .add_metric(metrics_name="eval_910_total_score", expr="avg(eval_910_total_score{})")
         .add_metric(metrics_name="eval_910_treasure_score", expr="avg(eval_910_treasure_score{})")
         .add_metric(metrics_name="eval_910_step_score", expr="avg(eval_910_step_score{})")
+        .add_metric(metrics_name="eval_910_min_total_score", expr="avg(eval_910_min_total_score{})")
+        .add_metric(metrics_name="eval_910_min_treasure_score", expr="avg(eval_910_min_treasure_score{})")
+        .add_metric(metrics_name="eval_910_min_step_score", expr="avg(eval_910_min_step_score{})")
         .end_panel()
         .end_group()
 

@@ -331,9 +331,16 @@ class EpisodeRunner:
             self.logger.info(f"[VAL-{metric_prefix}] no valid results for maps {map_ids}")
             return None
 
-        avg_total_score = np.mean([x["total_score"] for x in results])
-        avg_treasure_score = np.mean([x["treasure_score"] for x in results])
-        avg_step_score = np.mean([x["step_score"] for x in results])
+        total_scores = np.asarray([x["total_score"] for x in results], dtype=np.float32)
+        treasure_scores = np.asarray([x["treasure_score"] for x in results], dtype=np.float32)
+        step_scores = np.asarray([x["step_score"] for x in results], dtype=np.float32)
+
+        avg_total_score = np.mean(total_scores)
+        avg_treasure_score = np.mean(treasure_scores)
+        avg_step_score = np.mean(step_scores)
+        min_total_score = np.min(total_scores)
+        min_treasure_score = np.min(treasure_scores)
+        min_step_score = np.min(step_scores)
 
         avg_steps = np.mean([x["steps"] for x in results])
         avg_treasures = np.mean([x["treasures_collected"] for x in results])
@@ -346,6 +353,9 @@ class EpisodeRunner:
             f"avg_total_score:{avg_total_score:.2f} "
             f"avg_treasure_score:{avg_treasure_score:.2f} "
             f"avg_step_score:{avg_step_score:.2f} "
+            f"min_total_score:{min_total_score:.2f} "
+            f"min_treasure_score:{min_treasure_score:.2f} "
+            f"min_step_score:{min_step_score:.2f} "
             f"avg_steps:{avg_steps:.2f} "
             f"avg_treasures:{avg_treasures:.2f} "
             f"avg_buffs:{avg_buffs:.2f} "
@@ -357,6 +367,9 @@ class EpisodeRunner:
             f"{metric_prefix}_total_score": round(float(avg_total_score), 4),
             f"{metric_prefix}_treasure_score": round(float(avg_treasure_score), 4),
             f"{metric_prefix}_step_score": round(float(avg_step_score), 4),
+            f"{metric_prefix}_min_total_score": round(float(min_total_score), 4),
+            f"{metric_prefix}_min_treasure_score": round(float(min_treasure_score), 4),
+            f"{metric_prefix}_min_step_score": round(float(min_step_score), 4),
         }
 
     def run_validation(self):
