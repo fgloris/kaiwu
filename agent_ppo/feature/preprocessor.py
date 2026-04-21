@@ -217,6 +217,9 @@ class Preprocessor:
         self.last_hero_pos = None
         self.last_connected_opening_count = 0
         self.last_monster_to_agent_vecs = [None, None]
+        self.last_monster_line_blocked = [None, None]
+        self.last_monster_dist_grid = [None, None]
+        self.last_unique_boundary_cluster = None
 
         self.pos_history = deque(maxlen=8)
         self.abb_safe_score = 4.0
@@ -326,8 +329,6 @@ class Preprocessor:
             return True  # 出界直接视为墙，更保守
         return bool(self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0)
 
-        return bool(self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0)
-
     def _did_segment_cross_known_wall(self, start_pos, end_pos):
         if start_pos is None or end_pos is None:
             return False
@@ -368,6 +369,45 @@ class Preprocessor:
             if angle > angle_threshold:
                 return True
         return False
+
+    def _monster_position_from_feat(self, hero_pos, monster_feat):
+        if hero_pos is None or monster_feat is None:
+            return None
+        hero_x, hero_z = float(hero_pos[0]), float(hero_pos[1])
+        rel_x = float(monster_feat[2]) * MAP_SIZE
+        rel_z = float(monster_feat[3]) * MAP_SIZE
+        return hero_x + rel_x, hero_z + rel_z
+
+    def _monster_distance_grid_from_feat(self, monster_feat):
+        if monster_feat is None:
+            return None
+        rel_x = float(monster_feat[2]) * MAP_SIZE
+        rel_z = float(monster_feat[3]) * MAP_SIZE
+        return float(np.hypot(rel_x, rel_z))
+
+    def _line_to_monster_has_known_wall(self, hero_pos, monster_feat):
+        monster_pos = self._monster_position_from_feat(hero_pos, monster_feat)
+        if hero_pos is None or monster_pos is None:
+            return None
+        return self._did_segment_cross_known_wall(monster_pos, hero_pos)
+
+    def _unique_boundary_cluster_info(self, reward_feats):
+        clusters = reward_feats.get("connected_boundary_clusters", [])
+        hero_pos = reward_feats.get("hero_pos")
+        if len(clusters) != 1 or hero_pos is None:
+            return None
+
+        center = clusters[0].get("center")
+        if center is None:
+            return None
+
+        gx = float(hero_pos[0]) - LOCAL_MAP_HALF + float(center[0])
+        gz = float(hero_pos[1]) - LOCAL_MAP_HALF + float(center[1])
+        dist = float(np.hypot(gx - float(hero_pos[0]), gz - float(hero_pos[1])))
+        return {
+            "pos": (gx, gz),
+            "dist": dist,
+        }
 
     def _parse_legal_action_raw(self, legal_act_raw):
         """Parse env legal_action into a 16D binary mask."""
@@ -1434,28 +1474,85 @@ class Preprocessor:
         # abb 惩罚项
         abb_score, abb_penalty = self._compute_abb_penalty(cur_hero_pos)
         
+        # flash 奖励
         # 闪现只奖励受困追逃局势下的有效逃生，非受困乱闪会被惩罚。
         flash_reward = 0.0
 
         flash_count = int(env_info.get("flash_count", self.last_flash_count))
         used_flash = (flash_count - self.last_flash_count) > 0
-        danger_decreased = last_opening_count <= 1 and cur_opening_count > 1
-        crossed_wall = used_flash and self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
-        cur_monster_to_agent_vecs = [
-            self._monster_to_agent_vector(m1),
-            self._monster_to_agent_vector(m2) if second_exists else None,
+        monster_count = int(reward_feats.get("monster_feats_available", 0))
+        active_monster_count = min(2, max(0, monster_count))
+        cur_monster_feats = [m1, m2]
+        cur_monster_line_blocked = [
+            self._line_to_monster_has_known_wall(cur_hero_pos, cur_monster_feats[i]) if i < active_monster_count else None
+            for i in range(2)
         ]
-        crossed_monster = used_flash and last_opening_count <= 1 and self._did_cross_monster_by_angle(
+        cur_monster_dist_grid = [
+            self._monster_distance_grid_from_feat(cur_monster_feats[i]) if i < active_monster_count else None
+            for i in range(2)
+        ]
+        cur_monster_to_agent_vecs = [
+            self._monster_to_agent_vector(cur_monster_feats[i]) if i < active_monster_count else None
+            for i in range(2)
+        ]
+        crossed_wall = used_flash and self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
+        crossed_monster = used_flash and self._did_cross_monster_by_angle(
             cur_monster_to_agent_vecs,
             angle_threshold=150.0,
         )
+        cur_unique_boundary_cluster = self._unique_boundary_cluster_info(reward_feats)
+
+        made_wall_between_monster = False
+        for i in range(active_monster_count):
+            if self.last_monster_line_blocked[i] is False and cur_monster_line_blocked[i] is True:
+                made_wall_between_monster = True
+                break
+
+        single_close_monster = (
+            active_monster_count == 1
+            and self.last_monster_dist_grid[0] is not None
+            and self.last_monster_dist_grid[0] <= 2.0
+        )
+        closer_to_last_unique_cluster = False
+        if self.last_unique_boundary_cluster is not None and cur_hero_pos is not None:
+            cluster_pos = self.last_unique_boundary_cluster["pos"]
+            cur_cluster_dist = float(np.hypot(cluster_pos[0] - cur_hero_pos[0], cluster_pos[1] - cur_hero_pos[1]))
+            closer_to_last_unique_cluster = cur_cluster_dist + 1e-6 < float(self.last_unique_boundary_cluster["dist"])
+
+        single_monster_back_escape = (
+            single_close_monster
+            and last_opening_count <= 1
+            and crossed_monster
+            and (cur_opening_count > last_opening_count or closer_to_last_unique_cluster)
+        )
+
+        last_nearest_monster_dist = None
+        cur_nearest_monster_dist = None
+        last_valid_dists = [d for d in self.last_monster_dist_grid[:active_monster_count] if d is not None]
+        cur_valid_dists = [d for d in cur_monster_dist_grid[:active_monster_count] if d is not None]
+        if last_valid_dists:
+            last_nearest_monster_dist = min(last_valid_dists)
+        if cur_valid_dists:
+            cur_nearest_monster_dist = min(cur_valid_dists)
+
+        near_monster_escape_reward = 0.0
+        if (
+            last_nearest_monster_dist is not None
+            and cur_nearest_monster_dist is not None
+            and last_nearest_monster_dist <= 2.0
+            and cur_nearest_monster_dist > last_nearest_monster_dist
+        ):
+            dist_gain = cur_nearest_monster_dist - last_nearest_monster_dist
+            near_monster_escape_reward = min(4.0, 1.0 + 0.5 * dist_gain)
 
         flash_reward = 0.0
         if used_flash:
-            if danger_decreased and crossed_wall:
+            if crossed_wall and made_wall_between_monster:
                 flash_reward = 4.0
-            elif crossed_monster:
+            elif single_monster_back_escape:
                 flash_reward = 3.0
+            elif near_monster_escape_reward > 0.0:
+                flash_reward = near_monster_escape_reward
             else:
                 flash_reward = -1.0
 
@@ -1464,6 +1561,9 @@ class Preprocessor:
         self.last_hero_pos = cur_hero_pos
         self.last_connected_opening_count = cur_opening_count
         self.last_monster_to_agent_vecs = cur_monster_to_agent_vecs
+        self.last_monster_line_blocked = cur_monster_line_blocked
+        self.last_monster_dist_grid = cur_monster_dist_grid
+        self.last_unique_boundary_cluster = cur_unique_boundary_cluster
 
         # buff 奖励
         monster_goingto_speedup = bool(reward_feats['progress_feats'][3] < 100)
