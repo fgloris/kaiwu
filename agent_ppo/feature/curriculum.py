@@ -35,6 +35,6 @@ REWARD_CONFIG = RewardConfig(
     treasure_dist=0.30,
     buff_dist=0.30,
     buff_pick=0.70,
-    monster_dist=1.50,
+    monster_dist=0.50,
     survival_multiplier=1.10,
 )

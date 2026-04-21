@@ -74,16 +74,22 @@ class EpisodeRunner:
         self.val_episode_num = 10
         self.train_score_window = []
 
-        self.map_rebalance_start_episode = 2500
+        self.map_rebalance_start_episode = 1200
         self.map_12_probability_after_rebalance = 0.40
-        self.early_death_penalty_start_episode = 2500
-        self.early_death_penalty_upgrade_episode = 5000
+        self.early_death_penalty_start_episode = 800
+        self.early_death_penalty_upgrade_episode = 1600
         self.early_death_step_score_threshold = 100.0
         self.early_death_step_score_threshold_after_upgrade = 200.0
         self.default_fail_reward = -10.0
-        self.early_death_fail_reward = -20.0
-        self._logged_stage_2500 = False
-        self._logged_stage_5000 = False
+        self.early_death_fail_reward = -30.0
+        self.lr_stage_1_episode = self.map_rebalance_start_episode
+        self.lr_stage_2_episode = self.early_death_penalty_upgrade_episode
+        self.lr_stage_1_multiplier = 0.50
+        self.lr_stage_2_multiplier = 0.20
+        self.base_learning_rates = self._get_current_learning_rates()
+        self.current_lr_multiplier = 1.0
+        self._logged_stage_1 = False
+        self._logged_stage_2 = False
         
     def _append_train_score_window(self, total_score, treasure_score, step_score):
         self.train_score_window.append({
@@ -138,6 +144,44 @@ class EpisodeRunner:
             return conf["env_conf"]
         return conf if isinstance(conf, dict) else None
 
+    def _get_current_learning_rates(self):
+        optimizer = getattr(self.agent, "optimizer", None)
+        if optimizer is None:
+            return []
+        return [float(group.get("lr", 0.0)) for group in optimizer.param_groups]
+
+    def _set_learning_rate_multiplier(self, multiplier):
+        optimizer = getattr(self.agent, "optimizer", None)
+        if optimizer is None or not self.base_learning_rates:
+            return False
+        for group, base_lr in zip(optimizer.param_groups, self.base_learning_rates):
+            group["lr"] = float(base_lr) * float(multiplier)
+        self.current_lr_multiplier = float(multiplier)
+        return True
+
+    def _adjust_learning_rate_if_needed(self):
+        if self.episode_cnt > self.lr_stage_2_episode:
+            target_multiplier = self.lr_stage_2_multiplier
+        elif self.episode_cnt > self.lr_stage_1_episode:
+            target_multiplier = self.lr_stage_1_multiplier
+        else:
+            target_multiplier = 1.0
+
+        if abs(float(target_multiplier) - float(self.current_lr_multiplier)) < 1e-8:
+            return
+
+        if self._set_learning_rate_multiplier(target_multiplier):
+            current_lrs = self._get_current_learning_rates()
+            self.logger.warning(
+                f"[TRAIN-STAGE] episode:{self.episode_cnt} set learning rate multiplier "
+                f"to {target_multiplier:.0%}, lr={current_lrs}"
+            )
+        else:
+            self.logger.warning(
+                f"[TRAIN-STAGE] episode:{self.episode_cnt} failed to set learning rate: "
+                "agent optimizer is unavailable"
+            )
+
     def _make_train_conf_for_episode(self, episode_cnt):
         train_conf = copy.deepcopy(self.train_usr_conf)
         if episode_cnt <= self.map_rebalance_start_episode:
@@ -179,7 +223,7 @@ class EpisodeRunner:
 
     def _log_stage_change_if_needed(self):
         if (
-            not self._logged_stage_2500
+            not self._logged_stage_1
             and self.episode_cnt > self.map_rebalance_start_episode
         ):
             self.logger.warning(
@@ -188,10 +232,10 @@ class EpisodeRunner:
                 f"early death penalty={self.early_death_fail_reward} when step_score < "
                 f"{self.early_death_step_score_threshold:.0f}"
             )
-            self._logged_stage_2500 = True
+            self._logged_stage_1 = True
 
         if (
-            not self._logged_stage_5000
+            not self._logged_stage_2
             and self.episode_cnt > self.early_death_penalty_upgrade_episode
         ):
             self.logger.warning(
@@ -199,7 +243,7 @@ class EpisodeRunner:
                 f"early death penalty={self.early_death_fail_reward} when step_score < "
                 f"{self.early_death_step_score_threshold_after_upgrade:.0f}"
             )
-            self._logged_stage_5000 = True
+            self._logged_stage_2 = True
 
     def run_episodes(self):
         """Run a single episode and yield collected samples.
@@ -217,6 +261,7 @@ class EpisodeRunner:
 
             collector = []
             self.episode_cnt += 1
+            self._adjust_learning_rate_if_needed()
             self._log_stage_change_if_needed()
 
             train_conf_this_episode = self._make_train_conf_for_episode(self.episode_cnt)
@@ -240,7 +285,7 @@ class EpisodeRunner:
             step = 0
             total_reward = 0.0
             reward_vec_keys = [
-                "r_score_gain_sum",
+                "r_treasure_score_gain_sum",
                 "r_survival_gain_sum",
                 "r_monster_los_break_sum",
                 "r_flash_sum",
