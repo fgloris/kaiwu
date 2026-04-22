@@ -669,7 +669,7 @@ class Preprocessor:
         flash_reward = 0.0
         flash_count = env_info.get("flash_count", 0)
         if (flash_count - self.last_flash_count) > 0:
-            flash_reward = 0.8 * monster_dist_reward + 0.5 * treasure_dist_reward + 0.1 * buff_dist_reward
+            flash_reward = 0.8 * monster_dist_reward
         self.last_flash_count = flash_count
 
         # 撞墙惩罚
