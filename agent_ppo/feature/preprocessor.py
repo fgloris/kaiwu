@@ -1551,7 +1551,8 @@ class Preprocessor:
         self.last_monster_to_agent_vecs = cur_monster_to_agent_vecs
 
         # buff 奖励
-        monster_goingto_speedup = bool(reward_feats['progress_feats'][3] < 100)
+        monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
+        monster_goingto_speedup = bool(monster_speedup_step > 0 and self.step_no >= monster_speedup_step)
 
         collected_buff = int(env_info.get("collected_buff", self.last_collected_buff))
         buff_delta = float(max(0, collected_buff - self.last_collected_buff))
