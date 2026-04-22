@@ -21,10 +21,8 @@ from tools.metrics_utils import get_training_metrics
 from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
 
-MAP12_TRAIN_PROB = 0.40
 LR_SCALE_AFTER_MAP12_SCORE = 0.40
-MAP12_LR_SCORE_THRESHOLD = 600.0
-
+MAP12_LR_SCORE_THRESHOLD = 700.0
 
 def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     last_save_model_time = time.time()
@@ -128,27 +126,6 @@ class EpisodeRunner:
                 eval_conf["map_random"] = False
         return eval_conf
 
-    def _make_train_conf_for_episode(self):
-        train_conf = copy.deepcopy(self.train_usr_conf)
-        env_conf = train_conf.get("env_conf", train_conf) if isinstance(train_conf, dict) else train_conf
-        if not isinstance(env_conf, dict):
-            return train_conf
-
-        map_ids = list(env_conf.get("map", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
-        focus_maps = [m for m in map_ids if m in (1, 2)]
-        other_maps = [m for m in map_ids if m not in (1, 2)]
-        if not focus_maps:
-            return train_conf
-
-        if np.random.rand() < MAP12_TRAIN_PROB or not other_maps:
-            chosen_map = int(np.random.choice(focus_maps))
-        else:
-            chosen_map = int(np.random.choice(other_maps))
-
-        env_conf["map"] = [chosen_map]
-        env_conf["map_random"] = False
-        return train_conf
-
     def _set_learning_rate_scale(self, scale):
         optimizer = getattr(self.agent, "optimizer", None)
         if optimizer is None:
@@ -193,10 +170,8 @@ class EpisodeRunner:
             collector = []
             self.episode_cnt += 1
 
-            train_conf_this_episode = self._make_train_conf_for_episode()
-
             # Reset env / 重置环境
-            env_obs = self.env.reset(train_conf_this_episode)
+            env_obs = self.env.reset(self.train_usr_conf)
 
             # Disaster recovery / 容灾处理
             if handle_disaster_recovery(env_obs, self.logger):
