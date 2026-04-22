@@ -106,12 +106,9 @@ class Model(nn.Module):
         self.actor_head = nn.Sequential(
             make_fc_layer(256, 256),
             nn.ReLU(),
-            nn.Dropout(self.head_dropout_p),
             make_fc_layer(256, 128),
             nn.ReLU(),
-            make_fc_layer(128, 64),
-            nn.ReLU(),
-            make_fc_layer(64, action_num),
+            make_fc_layer(128, action_num),
         )
 
         self.critic_head = nn.Sequential(
@@ -120,9 +117,14 @@ class Model(nn.Module):
             nn.Dropout(self.head_dropout_p),
             make_fc_layer(256, 128),
             nn.ReLU(),
-            make_fc_layer(128, 32),
+            nn.Dropout(self.head_dropout_p),
+            make_fc_layer(128, value_num),
+        )
+
+        self.move_bias_head = nn.Sequential(
+            make_fc_layer(128, 64),
             nn.ReLU(),
-            make_fc_layer(32, value_num),
+            make_fc_layer(64, 8),
         )
 
     def forward(self, vector_obs, map_obs, inference=False):
@@ -140,6 +142,8 @@ class Model(nn.Module):
         hidden = self.fusion(hidden)
 
         logits = self.actor_head(hidden)
+        move_bias = self.move_bias_head(map_hidden)
+        logits[:, :8] = logits[:, :8] + move_bias
 
         value = self.critic_head(hidden)
         return logits, value

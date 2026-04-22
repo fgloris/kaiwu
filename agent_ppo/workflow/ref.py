@@ -188,7 +188,7 @@ class EpisodeRunner:
             step = 0
             total_reward = 0.0
             reward_vec_keys = [
-                "r_treasure_score_gain_sum",
+                "r_score_gain_sum",
                 "r_survival_gain_sum",
                 "r_monster_los_break_sum",
                 "r_flash_sum",

@@ -12,7 +12,6 @@ Training workflow for Gorge Chase PPO.
 
 import copy
 import os
-import random
 import time
 
 import numpy as np
@@ -73,23 +72,6 @@ class EpisodeRunner:
         self.val_every_n_episode = 40
         self.val_episode_num = 10
         self.train_score_window = []
-
-        self.map_rebalance_start_episode = 1200
-        self.map_12_probability_after_rebalance = 0.40
-        self.early_death_penalty_start_episode = 800
-        self.early_death_penalty_upgrade_episode = 1600
-        self.early_death_step_score_threshold = 100.0
-        self.early_death_step_score_threshold_after_upgrade = 200.0
-        self.default_fail_reward = -10.0
-        self.early_death_fail_reward = -30.0
-        self.lr_stage_1_episode = self.map_rebalance_start_episode
-        self.lr_stage_2_episode = self.early_death_penalty_upgrade_episode
-        self.lr_stage_1_multiplier = 0.50
-        self.lr_stage_2_multiplier = 0.20
-        self.base_learning_rates = self._get_current_learning_rates()
-        self.current_lr_multiplier = 1.0
-        self._logged_stage_1 = False
-        self._logged_stage_2 = False
         
     def _append_train_score_window(self, total_score, treasure_score, step_score):
         self.train_score_window.append({
@@ -139,111 +121,17 @@ class EpisodeRunner:
                 eval_conf["map_random"] = False
         return eval_conf
 
-    def _get_env_conf(self, conf):
-        if isinstance(conf, dict) and isinstance(conf.get("env_conf"), dict):
-            return conf["env_conf"]
-        return conf if isinstance(conf, dict) else None
-
-    def _get_current_learning_rates(self):
-        optimizer = getattr(self.agent, "optimizer", None)
-        if optimizer is None:
-            return []
-        return [float(group.get("lr", 0.0)) for group in optimizer.param_groups]
-
-    def _set_learning_rate_multiplier(self, multiplier):
-        optimizer = getattr(self.agent, "optimizer", None)
-        if optimizer is None or not self.base_learning_rates:
-            return False
-        for group, base_lr in zip(optimizer.param_groups, self.base_learning_rates):
-            group["lr"] = float(base_lr) * float(multiplier)
-        self.current_lr_multiplier = float(multiplier)
-        return True
-
-    def _adjust_learning_rate_if_needed(self):
-        if self.episode_cnt > self.lr_stage_2_episode:
-            target_multiplier = self.lr_stage_2_multiplier
-        elif self.episode_cnt > self.lr_stage_1_episode:
-            target_multiplier = self.lr_stage_1_multiplier
-        else:
-            target_multiplier = 1.0
-
-        if abs(float(target_multiplier) - float(self.current_lr_multiplier)) < 1e-8:
-            return
-
-        if self._set_learning_rate_multiplier(target_multiplier):
-            current_lrs = self._get_current_learning_rates()
-            self.logger.warning(
-                f"[TRAIN-STAGE] episode:{self.episode_cnt} set learning rate multiplier "
-                f"to {target_multiplier:.0%}, lr={current_lrs}"
-            )
-        else:
-            self.logger.warning(
-                f"[TRAIN-STAGE] episode:{self.episode_cnt} failed to set learning rate: "
-                "agent optimizer is unavailable"
-            )
-
-    def _make_train_conf_for_episode(self, episode_cnt):
-        train_conf = copy.deepcopy(self.train_usr_conf)
-        if episode_cnt <= self.map_rebalance_start_episode:
-            return train_conf
-
-        env_conf = self._get_env_conf(train_conf)
-        if env_conf is None:
-            return train_conf
-
-        configured_maps = list(env_conf.get("map", []))
-        if not configured_maps:
-            configured_maps = list(range(1, 11))
-
-        map_12 = [m for m in configured_maps if int(m) in (1, 2)]
-        other_maps = [m for m in configured_maps if int(m) not in (1, 2)]
-
-        if map_12 and other_maps:
-            if random.random() < self.map_12_probability_after_rebalance:
-                selected_map = random.choice(map_12)
-            else:
-                selected_map = random.choice(other_maps)
-        else:
-            selected_map = random.choice(configured_maps)
-
-        env_conf["map"] = [int(selected_map)]
-        env_conf["map_random"] = False
-        return train_conf
-
-    def _get_terminated_final_reward(self, step_score):
-        threshold = None
-        if self.episode_cnt > self.early_death_penalty_upgrade_episode:
-            threshold = self.early_death_step_score_threshold_after_upgrade
-        elif self.episode_cnt > self.early_death_penalty_start_episode:
-            threshold = self.early_death_step_score_threshold
-
-        if threshold is not None and float(step_score) < float(threshold):
-            return self.early_death_fail_reward, threshold
-        return self.default_fail_reward, threshold
-
-    def _log_stage_change_if_needed(self):
-        if (
-            not self._logged_stage_1
-            and self.episode_cnt > self.map_rebalance_start_episode
-        ):
-            self.logger.warning(
-                f"[TRAIN-STAGE] episode:{self.episode_cnt} entered post-{self.map_rebalance_start_episode} stage: "
-                f"map 1/2 probability={self.map_12_probability_after_rebalance:.0%}, "
-                f"early death penalty={self.early_death_fail_reward} when step_score < "
-                f"{self.early_death_step_score_threshold:.0f}"
-            )
-            self._logged_stage_1 = True
-
-        if (
-            not self._logged_stage_2
-            and self.episode_cnt > self.early_death_penalty_upgrade_episode
-        ):
-            self.logger.warning(
-                f"[TRAIN-STAGE] episode:{self.episode_cnt} entered post-{self.early_death_penalty_upgrade_episode} stage: "
-                f"early death penalty={self.early_death_fail_reward} when step_score < "
-                f"{self.early_death_step_score_threshold_after_upgrade:.0f}"
-            )
-            self._logged_stage_2 = True
+    def _get_life_step_terminal_bonus(self, step):
+        step = int(step)
+        if step < 100:
+            return -20.0
+        if step < 200:
+            return -10.0
+        if step < 300:
+            return 0.0
+        if step < 400:
+            return 10.0
+        return 20.0
 
     def run_episodes(self):
         """Run a single episode and yield collected samples.
@@ -261,10 +149,8 @@ class EpisodeRunner:
 
             collector = []
             self.episode_cnt += 1
-            self._adjust_learning_rate_if_needed()
-            self._log_stage_change_if_needed()
 
-            train_conf_this_episode = self._make_train_conf_for_episode(self.episode_cnt)
+            train_conf_this_episode = copy.deepcopy(self.train_usr_conf)
 
             # Reset env / 重置环境
             env_obs = self.env.reset(train_conf_this_episode)
@@ -285,7 +171,7 @@ class EpisodeRunner:
             step = 0
             total_reward = 0.0
             reward_vec_keys = [
-                "r_treasure_score_gain_sum",
+                "r_score_gain_sum",
                 "r_survival_gain_sum",
                 "r_monster_los_break_sum",
                 "r_flash_sum",
@@ -337,22 +223,20 @@ class EpisodeRunner:
                 if done:
                     env_info = env_obs["observation"]["env_info"]
                     total_score = env_info.get("total_score", 0)
-                    step_score = float(env_info.get("step_score", 0.0))
+                    life_step_bonus = self._get_life_step_terminal_bonus(step)
 
                     if terminated:
-                        fail_reward, early_death_threshold = self._get_terminated_final_reward(step_score)
-                        final_reward[0] = fail_reward
+                        final_reward[0] = -10.0
                         result_str = "FAIL"
-                        if early_death_threshold is not None and step_score < early_death_threshold:
-                            result_str = "EARLY_FAIL"
                     else:
                         final_reward[0] = 10.0 + 0.01 * total_score
                         result_str = "WIN"
+                    final_reward[0] += life_step_bonus
 
                     self.logger.info(
                         f"[GAMEOVER] episode:{self.episode_cnt} steps:{step} "
                         f"result:{result_str} sim_score:{total_score:.1f} "
-                        f"step_score:{step_score:.1f} "
+                        f"life_step_bonus:{life_step_bonus:.1f} "
                         f"total_reward:{total_reward:.3f}"
                     )
 

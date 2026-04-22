@@ -136,7 +136,7 @@ def build_monitor():
             name_en="reward_vector",
             type="line",
         )
-        .add_metric(metrics_name="r_treasure_score_gain_sum", expr="avg(r_treasure_score_gain_sum{})")
+        .add_metric(metrics_name="r_score_gain_sum", expr="avg(r_score_gain_sum{})")
         .add_metric(metrics_name="r_survival_gain_sum", expr="avg(r_survival_gain_sum{})")
         .add_metric(metrics_name="r_monster_los_break_sum", expr="avg(r_monster_los_break_sum{})")
         .add_metric(metrics_name="r_flash_sum", expr="avg(r_flash_sum{})")
