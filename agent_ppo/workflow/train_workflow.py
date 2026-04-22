@@ -21,9 +21,6 @@ from tools.metrics_utils import get_training_metrics
 from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
 
-LR_SCALE_AFTER_MAP12_SCORE = 0.40
-MAP12_LR_SCORE_THRESHOLD = 700.0
-
 def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     last_save_model_time = time.time()
     env = envs[0]
@@ -76,7 +73,6 @@ class EpisodeRunner:
         self.val_every_n_episode = 40
         self.val_episode_num = 10
         self.train_score_window = []
-        self.lr_scaled_by_eval12 = False
         
     def _append_train_score_window(self, total_score, treasure_score, step_score):
         self.train_score_window.append({
@@ -411,11 +407,6 @@ class EpisodeRunner:
         eval_12 = self._run_validation_group([1, 2], "eval_12")
         if eval_12 is not None:
             monitor_data.update(eval_12)
-            if (
-                not self.lr_scaled_by_eval12
-                and float(eval_12.get("eval_12_total_score", 0.0)) > MAP12_LR_SCORE_THRESHOLD
-            ):
-                self.lr_scaled_by_eval12 = self._set_learning_rate_scale(LR_SCALE_AFTER_MAP12_SCORE)
 
         eval_910 = self._run_validation_group([9, 10], "eval_910")
         if eval_910 is not None:
