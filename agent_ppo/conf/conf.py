@@ -4,44 +4,63 @@
 # Copyright © 1998 - 2026 Tencent. All Rights Reserved.
 ###########################################################################
 """
-Author: Tencent AI Arena Authors
-
-Configuration for Gorge Chase PPO.
-峡谷追猎 PPO 配置。
+Configuration for Gorge Chase PPO V6.
+在你当前 V5 代码基础上补强：目标记忆、探索/反绕圈、截断 bootstrap、train/val split。
 """
 
 
 class Config:
-    # 非地图向量特征维度
-    VECTOR_FEATURES = [
-        4,   # hero
-        7,   # monster1
-        7,   # monster2
-        8,   # ray collision
-        8,   # boundery cluster
-        8,  # nearest 2 treasures
-        8,  # 2 buffs
-        16,  # legal action mask
-        4,   # progress
-        2,   # situation
+    # ---------------- feature dims ----------------
+    # hero(10) + monster1(6) + monster2(6) + treasure1(5) + treasure2(5)
+    # + buff1(4) + buff2(4) + move_safety(8) + flash_safety(8) + global(11)
+    # = 67
+    HERO_DIM = 10
+    MONSTER_DIM = 6
+    TREASURE_DIM = 5
+    BUFF_DIM = 4
+    MOVE_SAFETY_DIM = 8
+    FLASH_SAFETY_DIM = 8
+    GLOBAL_DIM = 11
+
+    SCALAR_FEATURE_SPLIT = [
+        HERO_DIM,
+        MONSTER_DIM,
+        MONSTER_DIM,
+        TREASURE_DIM,
+        TREASURE_DIM,
+        BUFF_DIM,
+        BUFF_DIM,
+        MOVE_SAFETY_DIM,
+        FLASH_SAFETY_DIM,
+        GLOBAL_DIM,
     ]
-    VECTOR_FEATURE_LEN = sum(VECTOR_FEATURES)
+    SCALAR_FEATURE_DIM = sum(SCALAR_FEATURE_SPLIT)
 
-    # 局部地图大小：完整 21x21
-    MAP_CHANNEL = 3
-    MAP_SIZE = 21
+    # Local map patch for CNN
+    MAP_CHANNEL = 4
+    MAP_PATCH_SIZE = 9
+    MAP_PATCH_FLAT_DIM = MAP_CHANNEL * MAP_PATCH_SIZE * MAP_PATCH_SIZE
 
-    # 兼容 SampleData 里的 obs 维度定义
-    # 这里不再表示真实 flatten 后长度，只给 definition 用
-    DIM_OF_OBSERVATION = VECTOR_FEATURE_LEN + MAP_CHANNEL * MAP_SIZE * MAP_SIZE
+    FEATURE_LEN = SCALAR_FEATURE_DIM + MAP_PATCH_FLAT_DIM
+    DIM_OF_OBSERVATION = FEATURE_LEN
 
     ACTION_NUM = 16
     VALUE_NUM = 1
 
-    GAMMA = 0.99
+    # ---------------- PPO ----------------
+    GAMMA = 0.995
     LAMDA = 0.95
     INIT_LEARNING_RATE_START = 0.0003
     BETA_START = 0.001
     CLIP_PARAM = 0.2
     VF_COEF = 1.0
     GRAD_CLIP_RANGE = 0.5
+
+    # ---------------- workflow ----------------
+    TRAIN_MAPS = [1, 2, 3, 4, 5, 6, 7, 8]
+    VAL_MAPS = [9, 10]
+    VAL_EVERY_EPISODES = 10
+
+    # ---------------- heuristics ----------------
+    STALL_WINDOW = 10
+    STALL_DIST_THRESHOLD = 5.0

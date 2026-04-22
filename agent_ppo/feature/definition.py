@@ -4,33 +4,20 @@
 # Copyright © 1998 - 2026 Tencent. All Rights Reserved.
 ###########################################################################
 """
-Author: Tencent AI Arena Authors
-
-Data definitions, GAE computation for Gorge Chase PPO.
-峡谷追猎 PPO 数据类定义与 GAE 计算。
+Data definitions and GAE computation for Gorge Chase PPO.
+支持 terminated / truncated 区分：terminated 终止时 done=1，截断 bootstrap 时 done=0。
 """
 
 import numpy as np
-from common_python.utils.common_func import create_cls, attached
+from common_python.utils.common_func import create_cls
 from agent_ppo.conf.conf import Config
 
 
-# ObsData: feature=40D vector, legal_action=8D mask / 特征向量与合法动作掩码
-ObsData = create_cls(
-    "ObsData",
-    vector_feature=None,
-    map_feature=None,
-    legal_action=None,
-)
-
-# ActData: action, d_action(greedy), prob, value / 动作、贪心动作、概率、价值
+ObsData = create_cls("ObsData", feature=None, legal_action=None)
 ActData = create_cls("ActData", action=None, d_action=None, prob=None, value=None)
-
-# SampleData: single-frame sample with int dims / 单帧样本（整数表示维度）
 SampleData = create_cls(
     "SampleData",
-    vector_obs=Config.VECTOR_FEATURE_LEN,
-    map_obs=Config.MAP_CHANNEL * Config.MAP_SIZE * Config.MAP_SIZE, # map_obs 先按 flatten 长度存，进模型前再 reshape 成 [B,2,21,21]
+    obs=Config.DIM_OF_OBSERVATION,
     legal_action=Config.ACTION_NUM,
     act=1,
     reward=Config.VALUE_NUM,
@@ -44,27 +31,30 @@ SampleData = create_cls(
 
 
 def sample_process(list_sample_data):
-    """Fill next_value and compute GAE advantage.
-
-    填充 next_value 并使用 GAE 计算优势函数。
-    """
+    """Fill next_value for intermediate transitions and compute GAE."""
     for i in range(len(list_sample_data) - 1):
         list_sample_data[i].next_value = list_sample_data[i + 1].value
 
-    _calc_gae(list_sample_data)
+    if list_sample_data:
+        _calc_gae(list_sample_data)
     return list_sample_data
 
 
 def _calc_gae(list_sample_data):
-    """Compute GAE (Generalized Advantage Estimation).
-
-    计算广义优势估计（GAE）。
-    """
-    gae = 0.0
+    gae = np.zeros((Config.VALUE_NUM,), dtype=np.float32)
     gamma = Config.GAMMA
     lamda = Config.LAMDA
+
     for sample in reversed(list_sample_data):
-        delta = -sample.value + sample.reward + gamma * sample.next_value
-        gae = gae * gamma * lamda + delta
-        sample.advantage = gae
-        sample.reward_sum = gae + sample.value
+        done = float(np.array(sample.done).reshape(-1)[0])
+        mask = 1.0 - done
+
+        reward = np.array(sample.reward, dtype=np.float32).reshape(-1)[: Config.VALUE_NUM]
+        value = np.array(sample.value, dtype=np.float32).reshape(-1)[: Config.VALUE_NUM]
+        next_value = np.array(sample.next_value, dtype=np.float32).reshape(-1)[: Config.VALUE_NUM]
+
+        delta = reward + gamma * next_value * mask - value
+        gae = delta + gamma * lamda * mask * gae
+
+        sample.advantage = gae.astype(np.float32)
+        sample.reward_sum = (gae + value).astype(np.float32)
