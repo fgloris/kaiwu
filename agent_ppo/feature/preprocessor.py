@@ -1301,12 +1301,12 @@ class Preprocessor:
 
         # 在 passable layer 上叠加自身最近轨迹
         recent_self_path = list(self.pos_history) + [(int(hero_pos["x"]), int(hero_pos["z"]))]
-        _paint_recent_positions_on_passable(
-            map_feat[0],
-            recent_self_path,
-            gx0=gx0,
-            gy0=gy0,
-        )
+        #_paint_recent_positions_on_passable(
+        #    map_feat[0],
+        #    recent_self_path,
+        #    gx0=gx0,
+        #    gy0=gy0,
+        #)
 
         # 第二层：monster mask
         # 规则：
@@ -1333,8 +1333,8 @@ class Preprocessor:
                 continue
             if self.visibility_map[ox, oz] == 0:
                 continue
-            if not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
-                continue
+            #if not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
+            #    continue
 
             center_i = ox - gx0
             center_j = oz - gy0
@@ -1396,7 +1396,7 @@ class Preprocessor:
                 monster_feats[0],
                 monster_feats[1],
                 ray_collision_feat,
-                boundary_cluster_feat,
+                #boundary_cluster_feat,
                 treasure_feat,
                 buff_feat,
                 legal_action_feat,
