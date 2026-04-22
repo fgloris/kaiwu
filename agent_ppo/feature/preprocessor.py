@@ -237,8 +237,7 @@ class Preprocessor:
         self.last_treasure_dist_norm = -1.0
         self.last_buff_dist_norm = -1.0
 
-        # 全局物件记忆
-        self.treasure_memory = {}
+        # 全局物件记忆：只保留 buff；宝箱被捡走后不会刷新，直接使用当前帧 organs
         self.buff_memory = {}
         self.last_collected_buff = 0
         self.buff_refresh_time = 200
@@ -943,7 +942,6 @@ class Preprocessor:
         self.buff_refresh_time = int(env_info.get("buff_refresh_time", self.buff_refresh_time))
 
         # 当前帧在视野内真正出现过的 id
-        visible_treasure_ids = set()
         visible_buff_ids = set()
 
         # 1) 先处理当前 organs：出现了就记为 available=True
@@ -958,17 +956,7 @@ class Preprocessor:
             z = int(pos.get("z", 0))
             available = bool(organ.get("status", 1) == 1)
 
-            if sub_type == 1:
-                visible_treasure_ids.add(config_id)
-
-                mem = self.treasure_memory.setdefault(
-                    config_id,
-                    {"pos": (x, z), "available": available}
-                )
-                mem["pos"] = (x, z)
-                mem["available"] = available
-
-            elif sub_type == 2:
+            if sub_type == 2:
                 visible_buff_ids.add(config_id)
 
                 mem = self.buff_memory.setdefault(
@@ -979,16 +967,7 @@ class Preprocessor:
                 mem["available"] = available
                 mem["respawn_step"] = -1
 
-        # 2) treasure: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable
-        for tid, mem in self.treasure_memory.items():
-            if not self._is_in_current_view(mem["pos"], hero_pos):
-                continue
-            if tid in visible_treasure_ids:
-                continue
-            if mem.get("available", False):
-                mem["available"] = False
-
-        # 3) buff: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable，并启动 respawn
+        # 2) buff: mark missing visible buffs unavailable and start respawn tracking.
         for bid, mem in self.buff_memory.items():
             if not self._is_in_current_view(mem["pos"], hero_pos):
                 continue
@@ -1048,6 +1027,99 @@ class Preprocessor:
                 break
 
         return np.concatenate(feat_list, axis=0), items, best_dist_norm
+
+    def _build_current_treasure_features(self, hero_pos, organs, topk=2):
+        hero_x = int(hero_pos["x"])
+        hero_z = int(hero_pos["z"])
+        items = []
+
+        for organ in organs:
+            if int(organ.get("sub_type", 0)) != 1:
+                continue
+            if int(organ.get("status", 0)) != 1:
+                continue
+
+            config_id = int(organ.get("config_id", -1))
+            pos = organ.get("pos", {}) or {}
+            x = int(pos.get("x", -1))
+            z = int(pos.get("z", -1))
+            if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
+                continue
+
+            dx = float(x - hero_x)
+            dz = float(z - hero_z)
+            dist = float(np.hypot(dx, dz))
+            dir_x = dx / dist if dist > 1e-6 else 0.0
+            dir_z = dz / dist if dist > 1e-6 else 0.0
+            dist_norm = _norm(dist, MAP_SIZE * 1.41)
+            items.append({
+                "id": config_id,
+                "pos": (x, z),
+                "available": True,
+                "dist": dist,
+                "dist_norm": dist_norm,
+                "in_view": self._is_in_current_view((x, z), hero_pos),
+                "feat": np.array([
+                    np.clip(dir_x, -1.0, 1.0),
+                    np.clip(dir_z, -1.0, 1.0),
+                    dist_norm,
+                    1.0,
+                ], dtype=np.float32),
+            })
+
+        items.sort(key=lambda x: x["dist"])
+
+        feat_list = []
+        for item in items[:topk]:
+            feat_list.append(item["feat"])
+        while len(feat_list) < topk:
+            feat_list.append(np.zeros(4, dtype=np.float32))
+
+        best_dist_norm = float(items[0]["dist_norm"]) if items else -1.0
+        return np.concatenate(feat_list, axis=0), items, best_dist_norm
+
+    def _should_cut_treasure_by_monster_angle(self, hero_pos, treasure_items, monsters):
+        if not treasure_items:
+            return False
+
+        nearest_treasure = treasure_items[0]
+        if not nearest_treasure.get("in_view", False):
+            return False
+
+        hero_x = float(hero_pos["x"])
+        hero_z = float(hero_pos["z"])
+        treasure_pos = nearest_treasure["pos"]
+        treasure_vec = np.asarray(
+            [float(treasure_pos[0]) - hero_x, float(treasure_pos[1]) - hero_z],
+            dtype=np.float32,
+        )
+        treasure_norm = float(np.linalg.norm(treasure_vec))
+        if treasure_norm <= 1e-6:
+            return False
+        treasure_vec = treasure_vec / treasure_norm
+
+        nearest_monster_vec = None
+        nearest_monster_dist = None
+        for monster in monsters[:2]:
+            if int(monster.get("is_in_view", 0)) <= 0:
+                continue
+            pos = monster.get("pos", {}) or {}
+            mx = float(pos.get("x", hero_x))
+            mz = float(pos.get("z", hero_z))
+            vec = np.asarray([mx - hero_x, mz - hero_z], dtype=np.float32)
+            dist = float(np.linalg.norm(vec))
+            if dist <= 1e-6:
+                continue
+            if nearest_monster_dist is None or dist < nearest_monster_dist:
+                nearest_monster_dist = dist
+                nearest_monster_vec = vec / dist
+
+        if nearest_monster_vec is None:
+            return False
+
+        cos_angle = float(np.clip(np.dot(nearest_monster_vec, treasure_vec), -1.0, 1.0))
+        angle = float(np.degrees(np.arccos(cos_angle)))
+        return angle < 45.0
 
     def _compute_positive_dist_shaping(self, cur_dist_norm, last_attr_name):
         if cur_dist_norm < 0:
@@ -1224,11 +1296,14 @@ class Preprocessor:
 
         organs = frame_state.get("organs", [])
         self._update_organ_memory(env_info, organs, hero_pos)
-        treasure_feat, treasure_items, nearest_treasure_dist_norm = self._build_target_features(
-            hero_pos, self.treasure_memory, topk=2, prefer_available_only=True
+        treasure_feat, treasure_items, nearest_treasure_dist_norm = self._build_current_treasure_features(
+            hero_pos, organs, topk=2
         )
         buff_feat, buff_items, nearest_buff_dist_norm = self._build_target_features(
             hero_pos, self.buff_memory, topk=2, prefer_available_only=False
+        )
+        cut_treasure_by_monster_angle = self._should_cut_treasure_by_monster_angle(
+            hero_pos, treasure_items, monsters
         )
 
         # 地图特征
@@ -1368,6 +1443,7 @@ class Preprocessor:
             "connected_boundary_clusters": boundary_cluster_info["connected_clusters"],
             "connected_opening_count": connected_opening_count_raw,
             "is_dangerous": is_dangerous,
+            "cut_treasure_by_monster_angle": bool(cut_treasure_by_monster_angle),
             "nearest_treasure_dist_norm": float(nearest_treasure_dist_norm),
             "nearest_buff_dist_norm": float(nearest_buff_dist_norm),
         }
@@ -1433,17 +1509,17 @@ class Preprocessor:
         if cur_invisible_1:
             los_break_reward += 0.01
         if (not self.last_monster_invisible_1) and cur_invisible_1:
-            los_break_reward += 1.0
+            los_break_reward += 0.8
         if self.last_monster_invisible_1 and (not cur_invisible_1):
-            los_break_reward -= 0.5
+            los_break_reward -= 0.8
 
         if second_exists:
             if cur_invisible_2:
                 los_break_reward += 0.01
             if (not self.last_monster_invisible_2) and cur_invisible_2:
-                los_break_reward += 1.0
+                los_break_reward += 0.8
             if self.last_monster_invisible_2 and (not cur_invisible_2):
-                los_break_reward -= 1.0
+                los_break_reward -= 0.8
         
         self.last_monster_invisible_1 = cur_invisible_1
         if second_exists:
@@ -1536,10 +1612,10 @@ class Preprocessor:
             "last_buff_dist_norm",
         )
 
-        # treasure score gain is ignored while a monster is too close.
-        if is_monster_near:
-            treasure_score_gain = 0.0
-            treasure_dist_reward = 0.0
+        # treasure score gain is ignored while a monster is too close or blocks the path to the treasure.
+        if is_monster_near or bool(reward_feats.get("cut_treasure_by_monster_angle", False)):
+            treasure_score_gain = -5.0
+            treasure_dist_reward = -5.0
 
         # final step reward vector
         dist_shaping_norm_weight = 12.8
