@@ -1119,7 +1119,7 @@ class Preprocessor:
 
         cos_angle = float(np.clip(np.dot(nearest_monster_vec, treasure_vec), -1.0, 1.0))
         angle = float(np.degrees(np.arccos(cos_angle)))
-        return angle < 45.0
+        return angle < 30.0
 
     def _compute_positive_dist_shaping(self, cur_dist_norm, last_attr_name):
         if cur_dist_norm < 0:
@@ -1605,8 +1605,8 @@ class Preprocessor:
 
         # treasure score gain is ignored while a monster is too close or blocks the path to the treasure.
         if is_monster_near or bool(reward_feats.get("cut_treasure_by_monster_angle", False)):
-            treasure_score_gain = -5.0
-            treasure_dist_reward = -5.0
+            treasure_score_gain = -2.0
+            treasure_dist_reward = -0.2
 
         # final step reward vector
         dist_shaping_norm_weight = 12.8
