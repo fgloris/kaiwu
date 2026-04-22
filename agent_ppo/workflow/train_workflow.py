@@ -15,10 +15,16 @@ import os
 import time
 
 import numpy as np
+from agent_ppo.conf.conf import Config
 from agent_ppo.feature.definition import SampleData, sample_process
 from tools.metrics_utils import get_training_metrics
 from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
+
+MAP12_TRAIN_PROB = 0.40
+LR_SCALE_AFTER_MAP12_SCORE = 0.40
+MAP12_LR_SCORE_THRESHOLD = 600.0
+
 
 def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     last_save_model_time = time.time()
@@ -72,6 +78,7 @@ class EpisodeRunner:
         self.val_every_n_episode = 40
         self.val_episode_num = 10
         self.train_score_window = []
+        self.lr_scaled_by_eval12 = False
         
     def _append_train_score_window(self, total_score, treasure_score, step_score):
         self.train_score_window.append({
@@ -121,6 +128,42 @@ class EpisodeRunner:
                 eval_conf["map_random"] = False
         return eval_conf
 
+    def _make_train_conf_for_episode(self):
+        train_conf = copy.deepcopy(self.train_usr_conf)
+        env_conf = train_conf.get("env_conf", train_conf) if isinstance(train_conf, dict) else train_conf
+        if not isinstance(env_conf, dict):
+            return train_conf
+
+        map_ids = list(env_conf.get("map", [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]))
+        focus_maps = [m for m in map_ids if m in (1, 2)]
+        other_maps = [m for m in map_ids if m not in (1, 2)]
+        if not focus_maps:
+            return train_conf
+
+        if np.random.rand() < MAP12_TRAIN_PROB or not other_maps:
+            chosen_map = int(np.random.choice(focus_maps))
+        else:
+            chosen_map = int(np.random.choice(other_maps))
+
+        env_conf["map"] = [chosen_map]
+        env_conf["map_random"] = False
+        return train_conf
+
+    def _set_learning_rate_scale(self, scale):
+        optimizer = getattr(self.agent, "optimizer", None)
+        if optimizer is None:
+            return False
+
+        lr = float(Config.INIT_LEARNING_RATE_START) * float(scale)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
+
+        self.logger.warning(
+            f"[LR] eval_12 score reached threshold, set learning rate to {lr:.8f} "
+            f"({scale:.0%} of initial lr)"
+        )
+        return True
+
     def _get_life_step_terminal_bonus(self, step):
         step = int(step)
         if step < 100:
@@ -150,7 +193,7 @@ class EpisodeRunner:
             collector = []
             self.episode_cnt += 1
 
-            train_conf_this_episode = copy.deepcopy(self.train_usr_conf)
+            train_conf_this_episode = self._make_train_conf_for_episode()
 
             # Reset env / 重置环境
             env_obs = self.env.reset(train_conf_this_episode)
@@ -393,6 +436,11 @@ class EpisodeRunner:
         eval_12 = self._run_validation_group([1, 2], "eval_12")
         if eval_12 is not None:
             monitor_data.update(eval_12)
+            if (
+                not self.lr_scaled_by_eval12
+                and float(eval_12.get("eval_12_total_score", 0.0)) > MAP12_LR_SCORE_THRESHOLD
+            ):
+                self.lr_scaled_by_eval12 = self._set_learning_rate_scale(LR_SCALE_AFTER_MAP12_SCORE)
 
         eval_910 = self._run_validation_group([9, 10], "eval_910")
         if eval_910 is not None:

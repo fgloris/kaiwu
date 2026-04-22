@@ -1605,7 +1605,7 @@ class Preprocessor:
 
         # treasure score gain is ignored while a monster is too close or blocks the path to the treasure.
         if is_monster_near or bool(reward_feats.get("cut_treasure_by_monster_angle", False)):
-            treasure_score_gain = -2.0
+            treasure_score_gain = 0.0
             treasure_dist_reward = -0.2
 
         # final step reward vector
