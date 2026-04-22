@@ -1323,15 +1323,6 @@ class Preprocessor:
                 gy = gy0 + j
                 if 0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT:
                     map_feat[0, i, j] = float(self.passable_map[gx, gy])
-        
-        # 在 passable layer 上叠加自身最近轨迹
-        recent_self_path = list(self.pos_history) + [(int(hero_pos["x"]), int(hero_pos["z"]))]
-        _paint_recent_positions_on_passable(
-            map_feat[0],
-            recent_self_path,
-            gx0=gx0,
-            gy0=gy0,
-        )
 
         # 第二层：monster mask
         # 规则：
