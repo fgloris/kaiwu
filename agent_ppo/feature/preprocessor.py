@@ -237,7 +237,8 @@ class Preprocessor:
         self.last_treasure_dist_norm = -1.0
         self.last_buff_dist_norm = -1.0
 
-        # 全局物件记忆：只保留 buff；宝箱被捡走后不会刷新，直接使用当前帧 organs
+        # 全局物件记忆
+        self.treasure_memory = {}
         self.buff_memory = {}
         self.last_collected_buff = 0
         self.buff_refresh_time = 200
@@ -877,11 +878,13 @@ class Preprocessor:
             dir_scores /= total_connected_weight
 
         dir_scores = np.clip(dir_scores, 0.0, 1.0).astype(np.float32)
+        is_dangerous = len(connected_clusters) <= 1
         return dir_scores, {
             "boundary_pts": boundary_pts,
             "clusters": clusters,
             "connected_clusters": connected_clusters,
             "connected_opening_count": len(connected_clusters),
+            "is_dangerous": is_dangerous,
             "masked_local_passable": np.array(local_passable, copy=True),
         }
 
@@ -942,6 +945,7 @@ class Preprocessor:
         self.buff_refresh_time = int(env_info.get("buff_refresh_time", self.buff_refresh_time))
 
         # 当前帧在视野内真正出现过的 id
+        visible_treasure_ids = set()
         visible_buff_ids = set()
 
         # 1) 先处理当前 organs：出现了就记为 available=True
@@ -956,7 +960,17 @@ class Preprocessor:
             z = int(pos.get("z", 0))
             available = bool(organ.get("status", 1) == 1)
 
-            if sub_type == 2:
+            if sub_type == 1:
+                visible_treasure_ids.add(config_id)
+
+                mem = self.treasure_memory.setdefault(
+                    config_id,
+                    {"pos": (x, z), "available": available}
+                )
+                mem["pos"] = (x, z)
+                mem["available"] = available
+
+            elif sub_type == 2:
                 visible_buff_ids.add(config_id)
 
                 mem = self.buff_memory.setdefault(
@@ -967,7 +981,16 @@ class Preprocessor:
                 mem["available"] = available
                 mem["respawn_step"] = -1
 
-        # 2) buff: mark missing visible buffs unavailable and start respawn tracking.
+        # 2) treasure: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable
+        for tid, mem in self.treasure_memory.items():
+            if not self._is_in_current_view(mem["pos"], hero_pos):
+                continue
+            if tid in visible_treasure_ids:
+                continue
+            if mem.get("available", False):
+                mem["available"] = False
+
+        # 3) buff: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable，并启动 respawn
         for bid, mem in self.buff_memory.items():
             if not self._is_in_current_view(mem["pos"], hero_pos):
                 continue
@@ -1028,67 +1051,19 @@ class Preprocessor:
 
         return np.concatenate(feat_list, axis=0), items, best_dist_norm
 
-    def _build_current_treasure_features(self, hero_pos, organs, topk=2):
-        hero_x = int(hero_pos["x"])
-        hero_z = int(hero_pos["z"])
-        items = []
-
-        for organ in organs:
-            if int(organ.get("sub_type", 0)) != 1:
-                continue
-            if int(organ.get("status", 0)) != 1:
-                continue
-
-            config_id = int(organ.get("config_id", -1))
-            pos = organ.get("pos", {}) or {}
-            x = int(pos.get("x", -1))
-            z = int(pos.get("z", -1))
-            if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
-                continue
-
-            dx = float(x - hero_x)
-            dz = float(z - hero_z)
-            dist = float(np.hypot(dx, dz))
-            dir_x = dx / dist if dist > 1e-6 else 0.0
-            dir_z = dz / dist if dist > 1e-6 else 0.0
-            dist_norm = _norm(dist, MAP_SIZE * 1.41)
-            items.append({
-                "id": config_id,
-                "pos": (x, z),
-                "available": True,
-                "dist": dist,
-                "dist_norm": dist_norm,
-                "in_view": self._is_in_current_view((x, z), hero_pos),
-                "feat": np.array([
-                    np.clip(dir_x, -1.0, 1.0),
-                    np.clip(dir_z, -1.0, 1.0),
-                    dist_norm,
-                    1.0,
-                ], dtype=np.float32),
-            })
-
-        items.sort(key=lambda x: x["dist"])
-
-        feat_list = []
-        for item in items[:topk]:
-            feat_list.append(item["feat"])
-        while len(feat_list) < topk:
-            feat_list.append(np.zeros(4, dtype=np.float32))
-
-        best_dist_norm = float(items[0]["dist_norm"]) if items else -1.0
-        return np.concatenate(feat_list, axis=0), items, best_dist_norm
-
     def _should_cut_treasure_by_monster_angle(self, hero_pos, treasure_items, monsters):
         if not treasure_items:
             return False
 
         nearest_treasure = treasure_items[0]
-        if not nearest_treasure.get("in_view", False):
+        if not nearest_treasure.get("available", False):
+            return False
+        treasure_pos = nearest_treasure["pos"]
+        if not self._is_in_current_view(treasure_pos, hero_pos):
             return False
 
         hero_x = float(hero_pos["x"])
         hero_z = float(hero_pos["z"])
-        treasure_pos = nearest_treasure["pos"]
         treasure_vec = np.asarray(
             [float(treasure_pos[0]) - hero_x, float(treasure_pos[1]) - hero_z],
             dtype=np.float32,
@@ -1296,8 +1271,8 @@ class Preprocessor:
 
         organs = frame_state.get("organs", [])
         self._update_organ_memory(env_info, organs, hero_pos)
-        treasure_feat, treasure_items, nearest_treasure_dist_norm = self._build_current_treasure_features(
-            hero_pos, organs, topk=2
+        treasure_feat, treasure_items, nearest_treasure_dist_norm = self._build_target_features(
+            hero_pos, self.treasure_memory, topk=2, prefer_available_only=True
         )
         buff_feat, buff_items, nearest_buff_dist_norm = self._build_target_features(
             hero_pos, self.buff_memory, topk=2, prefer_available_only=False
@@ -1323,6 +1298,15 @@ class Preprocessor:
                 gy = gy0 + j
                 if 0 <= gx < MAP_SIZE_INT and 0 <= gy < MAP_SIZE_INT:
                     map_feat[0, i, j] = float(self.passable_map[gx, gy])
+
+        # 在 passable layer 上叠加自身最近轨迹
+        recent_self_path = list(self.pos_history) + [(int(hero_pos["x"]), int(hero_pos["z"]))]
+        _paint_recent_positions_on_passable(
+            map_feat[0],
+            recent_self_path,
+            gx0=gx0,
+            gy0=gy0,
+        )
 
         # 第二层：monster mask
         # 规则：
@@ -1399,13 +1383,10 @@ class Preprocessor:
         boundary_cluster_feat, boundary_cluster_info = self._compute_boundary_cluster_direction_scores(
             local_passable_21
         )
-        connected_opening_count_raw = int(boundary_cluster_info["connected_opening_count"])
-        connected_opening_count = _norm(connected_opening_count_raw, 5)
-        active_monster_count = min(2, max(0, len(monsters)))
-        is_monster_near = self._is_monster_near(monster_feats, active_monster_count, env_info)
-        is_dangerous = bool(is_monster_near or connected_opening_count_raw <= 1)
+        connected_opening_count = _norm(boundary_cluster_info["connected_opening_count"], 5)
+        is_dangerous = _norm(int(boundary_cluster_info["is_dangerous"]), 1)
         
-        situation_feat = np.array([connected_opening_count, float(is_dangerous)], dtype=np.float32)
+        situation_feat = np.array([connected_opening_count, is_dangerous], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         # 新增一组 8 维边缘连通簇方向特征，放在 ray collision 特征之后
@@ -1432,8 +1413,8 @@ class Preprocessor:
             "last_action": int(last_action),
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
             "connected_boundary_clusters": boundary_cluster_info["connected_clusters"],
-            "connected_opening_count": connected_opening_count_raw,
-            "is_dangerous": is_dangerous,
+            "connected_opening_count": int(boundary_cluster_info["connected_opening_count"]),
+            "is_dangerous": bool(boundary_cluster_info["is_dangerous"]),
             "cut_treasure_by_monster_angle": bool(cut_treasure_by_monster_angle),
             "nearest_treasure_dist_norm": float(nearest_treasure_dist_norm),
             "nearest_buff_dist_norm": float(nearest_buff_dist_norm),
@@ -1455,8 +1436,9 @@ class Preprocessor:
         cur_treasure_score = float(env_info.get("treasure_score", 0.0))
         treasure_score_gain = cur_treasure_score - self.last_treasure_score
         self.last_treasure_score = cur_treasure_score
-        
+
         # 怪物 dist shaping
+
         second_exists = bool(reward_feats['progress_feats'][2] < 1e-6)
 
         monster_dist_reward = 0.0
@@ -1470,9 +1452,9 @@ class Preprocessor:
             active_monster_count,
             env_info,
         )
-
         r1 = 0.0
         r2 = 0.0
+
         # monster 1
         if self.last_monster_dist_norm_1 >= 0:
             cur_dist_1 = float(m1[4])   # dist_norm
@@ -1500,17 +1482,17 @@ class Preprocessor:
         if cur_invisible_1:
             los_break_reward += 0.01
         if (not self.last_monster_invisible_1) and cur_invisible_1:
-            los_break_reward += 0.8
+            los_break_reward += 1.0
         if self.last_monster_invisible_1 and (not cur_invisible_1):
-            los_break_reward -= 0.8
+            los_break_reward -= 0.5
 
         if second_exists:
             if cur_invisible_2:
                 los_break_reward += 0.01
             if (not self.last_monster_invisible_2) and cur_invisible_2:
-                los_break_reward += 0.8
+                los_break_reward += 1.0
             if self.last_monster_invisible_2 and (not cur_invisible_2):
-                los_break_reward -= 0.8
+                los_break_reward -= 1.0
         
         self.last_monster_invisible_1 = cur_invisible_1
         if second_exists:
@@ -1542,30 +1524,21 @@ class Preprocessor:
 
         flash_count = int(env_info.get("flash_count", self.last_flash_count))
         used_flash = (flash_count - self.last_flash_count) > 0
-        danger_decreased = self.last_is_dangerous and cur_is_dangerous > 1
-        flash_move_dist = None
-        if used_flash and self.last_hero_pos is not None and cur_hero_pos is not None:
-            flash_move_dist = float(np.hypot(
-                float(cur_hero_pos[0]) - float(self.last_hero_pos[0]),
-                float(cur_hero_pos[1]) - float(self.last_hero_pos[1]),
-            ))
-        flash_hit_wall = flash_move_dist is not None and flash_move_dist <= 5.0
+        danger_decreased = last_opening_count <= 1 and cur_opening_count > 1
         crossed_wall = used_flash and self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
         cur_monster_to_agent_vecs = [
             self._monster_to_agent_vector(m1),
             self._monster_to_agent_vector(m2) if second_exists else None,
         ]
-        crossed_monster = used_flash and self.last_is_dangerous and self._did_cross_monster_by_angle(
+        crossed_monster = used_flash and last_opening_count <= 1 and self._did_cross_monster_by_angle(
             cur_monster_to_agent_vecs,
             angle_threshold=150.0,
         )
 
         flash_reward = 0.0
         if used_flash:
-            if flash_hit_wall:
-                flash_reward = -4.0
-            elif danger_decreased and crossed_wall:
-                flash_reward = 8.0
+            if danger_decreased and crossed_wall:
+                flash_reward = 4.0
             elif crossed_monster:
                 flash_reward = 8.0
             else:
