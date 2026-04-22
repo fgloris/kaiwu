@@ -373,6 +373,7 @@ class Preprocessor:
         return vec / norm
 
     def _did_cross_monster_by_angle(self, cur_monster_vecs, angle_threshold=150.0):
+        crossed_any = False
         for last_vec, cur_vec in zip(self.last_monster_to_agent_vecs, cur_monster_vecs):
             if last_vec is None or cur_vec is None:
                 continue
@@ -380,7 +381,8 @@ class Preprocessor:
             angle = float(np.degrees(np.arccos(cos_angle)))
             if not angle > angle_threshold:
                 return False
-        return True
+            crossed_any = True
+        return crossed_any
 
     def _nearest_monster_grid_distance(self, monster_feats, active_monster_count):
         dists = []
@@ -1383,10 +1385,19 @@ class Preprocessor:
         boundary_cluster_feat, boundary_cluster_info = self._compute_boundary_cluster_direction_scores(
             local_passable_21
         )
-        connected_opening_count = _norm(boundary_cluster_info["connected_opening_count"], 5)
-        is_dangerous = _norm(int(boundary_cluster_info["is_dangerous"]), 1)
+        connected_opening_count_raw = int(boundary_cluster_info["connected_opening_count"])
+        connected_opening_count = _norm(connected_opening_count_raw, 5)
+        active_monster_count = min(2, max(0, len(monsters)))
+        two_monsters_in_view = bool(
+            active_monster_count >= 2
+            and float(monster_feats[0][0]) > 0.5
+            and float(monster_feats[1][0]) > 0.5
+        )
+        monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
+        is_monster_speedup = bool(monster_speedup_step > 0 and self.step_no >= monster_speedup_step)
+        is_dangerous = bool(two_monsters_in_view or is_monster_speedup or connected_opening_count_raw <= 1)
         
-        situation_feat = np.array([connected_opening_count, is_dangerous], dtype=np.float32)
+        situation_feat = np.array([connected_opening_count, float(is_dangerous)], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         # 新增一组 8 维边缘连通簇方向特征，放在 ray collision 特征之后
@@ -1413,8 +1424,10 @@ class Preprocessor:
             "last_action": int(last_action),
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
             "connected_boundary_clusters": boundary_cluster_info["connected_clusters"],
-            "connected_opening_count": int(boundary_cluster_info["connected_opening_count"]),
-            "is_dangerous": bool(boundary_cluster_info["is_dangerous"]),
+            "connected_opening_count": connected_opening_count_raw,
+            "is_dangerous": is_dangerous,
+            "two_monsters_in_view": two_monsters_in_view,
+            "is_monster_speedup": is_monster_speedup,
             "cut_treasure_by_monster_angle": bool(cut_treasure_by_monster_angle),
             "nearest_treasure_dist_norm": float(nearest_treasure_dist_norm),
             "nearest_buff_dist_norm": float(nearest_buff_dist_norm),
@@ -1439,14 +1452,14 @@ class Preprocessor:
 
         # 怪物 dist shaping
 
-        second_exists = bool(reward_feats['progress_feats'][2] < 1e-6)
+        active_monster_count = min(2, max(0, int(reward_feats.get("monster_feats_available", 0))))
+        second_exists = active_monster_count >= 2
 
         monster_dist_reward = 0.0
         cur_hero_pos = reward_feats.get("hero_pos")
 
         m1 = reward_feats['monster_feats'][0]
         m2 = reward_feats['monster_feats'][1]
-        active_monster_count = min(2, max(0, int(reward_feats.get("monster_feats_available", 0))))
         is_monster_near = self._is_monster_near(
             reward_feats["monster_feats"],
             active_monster_count,
@@ -1482,17 +1495,17 @@ class Preprocessor:
         if cur_invisible_1:
             los_break_reward += 0.01
         if (not self.last_monster_invisible_1) and cur_invisible_1:
-            los_break_reward += 1.0
+            los_break_reward += 0.8
         if self.last_monster_invisible_1 and (not cur_invisible_1):
-            los_break_reward -= 0.5
+            los_break_reward -= 0.8
 
         if second_exists:
             if cur_invisible_2:
                 los_break_reward += 0.01
             if (not self.last_monster_invisible_2) and cur_invisible_2:
-                los_break_reward += 1.0
+                los_break_reward += 0.8
             if self.last_monster_invisible_2 and (not cur_invisible_2):
-                los_break_reward -= 1.0
+                los_break_reward -= 0.8
         
         self.last_monster_invisible_1 = cur_invisible_1
         if second_exists:
@@ -1503,7 +1516,6 @@ class Preprocessor:
         # 局势相关 reward settings
         cur_is_dangerous = bool(reward_feats.get("is_dangerous", False))
         cur_opening_count = int(reward_feats.get("connected_opening_count", 0))
-        last_opening_count = int(self.last_connected_opening_count)
         danger_penalty = -1.0 if cur_is_dangerous else 0.0
 
 
@@ -1524,25 +1536,32 @@ class Preprocessor:
 
         flash_count = int(env_info.get("flash_count", self.last_flash_count))
         used_flash = (flash_count - self.last_flash_count) > 0
-        danger_decreased = last_opening_count <= 1 and cur_opening_count > 1
+        was_dangerous = bool(self.last_is_dangerous)
         crossed_wall = used_flash and self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
         cur_monster_to_agent_vecs = [
             self._monster_to_agent_vector(m1),
             self._monster_to_agent_vector(m2) if second_exists else None,
         ]
-        crossed_monster = used_flash and last_opening_count <= 1 and self._did_cross_monster_by_angle(
+        crossed_monster = used_flash and self._did_cross_monster_by_angle(
             cur_monster_to_agent_vecs,
             angle_threshold=150.0,
         )
+        flash_move_dist = None
+        if used_flash and self.last_hero_pos is not None and cur_hero_pos is not None:
+            flash_move_dist = float(np.hypot(
+                float(cur_hero_pos[0]) - float(self.last_hero_pos[0]),
+                float(cur_hero_pos[1]) - float(self.last_hero_pos[1]),
+            ))
 
         flash_reward = 0.0
         if used_flash:
-            if danger_decreased and crossed_wall:
-                flash_reward = 4.0
-            elif crossed_monster:
+            if was_dangerous and (crossed_wall or crossed_monster):
                 flash_reward = 8.0
             else:
-                flash_reward = -1.0
+                if flash_move_dist is None:
+                    flash_reward = -1.0
+                else:
+                    flash_reward = -1.0 - 3.0 * (1.0 - _norm(flash_move_dist, 10.0))
 
         self.last_flash_count = flash_count
         self.last_is_dangerous = cur_is_dangerous
