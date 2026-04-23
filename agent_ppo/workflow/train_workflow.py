@@ -11,6 +11,7 @@ Training workflow for Gorge Chase PPO.
 """
 
 import copy
+import math
 import os
 import time
 
@@ -73,6 +74,7 @@ class EpisodeRunner:
         self.val_every_n_episode = 40
         self.val_episode_num = 10
         self.train_score_window = []
+        self.current_learning_rate = float(Config.INIT_LEARNING_RATE_START)
         
     def _append_train_score_window(self, total_score, treasure_score, step_score):
         self.train_score_window.append({
@@ -97,6 +99,11 @@ class EpisodeRunner:
             "reward": round(float(reward_value), 4),
             "episode_steps": int(step),
             "episode_cnt": int(self.episode_cnt),
+            "learning_rate": round(float(self.current_learning_rate), 8),
+            "peak_learning_rate": round(float(Config.INIT_LEARNING_RATE_START), 8),
+            "min_learning_rate": round(float(Config.MIN_LEARNING_RATE), 8),
+            "lr_warmup_episodes": int(Config.LR_WARMUP_EPISODES),
+            "lr_cosine_end_episode": int(Config.LR_WARMUP_EPISODES + Config.LR_COSINE_EPISODES),
             "train_avg_total_score": round(float(np.mean(total_scores)), 4),
             "train_avg_treasure_score": round(float(np.mean(treasure_scores)), 4),
             "train_avg_step_score": round(float(np.mean(step_scores)), 4),
@@ -110,6 +117,46 @@ class EpisodeRunner:
         self.monitor.put_data({os.getpid(): monitor_data})
         self.last_report_monitor_time = now
         self.train_score_window.clear()
+
+    def _calc_learning_rate_by_episode(self, episode_cnt):
+        peak_lr = float(Config.INIT_LEARNING_RATE_START)
+        min_lr = float(Config.MIN_LEARNING_RATE)
+        if not bool(Config.LR_SCHEDULE_ENABLE):
+            return peak_lr
+
+        warmup_episodes = max(1, int(Config.LR_WARMUP_EPISODES))
+        cosine_episodes = max(1, int(Config.LR_COSINE_EPISODES))
+        episode_cnt = max(0, int(episode_cnt))
+
+        if episode_cnt <= warmup_episodes:
+            progress = episode_cnt / float(warmup_episodes)
+            return min_lr + (peak_lr - min_lr) * progress
+
+        progress = min(1.0, (episode_cnt - warmup_episodes) / float(cosine_episodes))
+        cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr + (peak_lr - min_lr) * cosine
+
+    def _set_learning_rate(self, lr):
+        optimizer = getattr(self.agent, "optimizer", None)
+        if optimizer is None:
+            return False
+
+        lr = float(lr)
+        for param_group in optimizer.param_groups:
+            param_group["lr"] = lr
+        self.current_learning_rate = lr
+        return True
+
+    def _update_learning_rate_by_episode(self):
+        lr = self._calc_learning_rate_by_episode(self.episode_cnt)
+        ok = self._set_learning_rate(lr)
+        if ok and (
+            self.episode_cnt <= 3
+            or self.episode_cnt == int(Config.LR_WARMUP_EPISODES)
+            or self.episode_cnt % 1000 == 0
+        ):
+            self.logger.info(f"[LR] episode:{self.episode_cnt} learning_rate:{lr:.8f}")
+        return lr
 
     def _make_eval_conf(self, map_ids):
         eval_conf = copy.deepcopy(self.val_usr_conf)
@@ -130,11 +177,8 @@ class EpisodeRunner:
         lr = float(Config.INIT_LEARNING_RATE_START) * float(scale)
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr
+        self.current_learning_rate = lr
 
-        self.logger.warning(
-            f"[LR] eval_12 score reached threshold, set learning rate to {lr:.8f} "
-            f"({scale:.0%} of initial lr)"
-        )
         return True
 
     def _get_life_step_terminal_bonus(self, step):
@@ -178,6 +222,7 @@ class EpisodeRunner:
                 self.agent.preprocessor.set_curriculum_episode(self.episode_cnt)
             self.agent.reset(env_obs)
             self.agent.load_model(id="latest")
+            self._update_learning_rate_by_episode()
 
             # Initial observation / 初始观测处理
             obs_data, remain_info = self.agent.observation_process(env_obs)

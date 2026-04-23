@@ -80,6 +80,48 @@ def build_monitor():
         .end_group()
 
         .add_group(
+            group_name="学习率指标",
+            group_name_en="learning_rate",
+        )
+        .add_panel(
+            name="episode_cnt",
+            name_en="episode_cnt",
+            type="line",
+        )
+        .add_metric(
+            metrics_name="episode_cnt",
+            expr="avg(episode_cnt{})",
+        )
+        .add_metric(
+            metrics_name="lr_warmup_episodes",
+            expr="avg(lr_warmup_episodes{})",
+        )
+        .add_metric(
+            metrics_name="lr_cosine_end_episode",
+            expr="avg(lr_cosine_end_episode{})",
+        )
+        .end_panel()
+        .add_panel(
+            name="learning_rate",
+            name_en="learning_rate",
+            type="line",
+        )
+        .add_metric(
+            metrics_name="learning_rate",
+            expr="avg(learning_rate{})",
+        )
+        .add_metric(
+            metrics_name="peak_learning_rate",
+            expr="avg(peak_learning_rate{})",
+        )
+        .add_metric(
+            metrics_name="min_learning_rate",
+            expr="avg(min_learning_rate{})",
+        )
+        .end_panel()
+        .end_group()
+
+        .add_group(
             group_name="环境指标",
             group_name_en="env",
         )
