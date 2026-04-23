@@ -47,9 +47,7 @@ class Algorithm:
 
         训练入口：对一批 SampleData 执行 PPO 更新。
         """
-        vector_obs = torch.stack([f.vector_obs for f in list_sample_data]).to(self.device)
-        map_obs = torch.stack([f.map_obs for f in list_sample_data]).to(self.device)
-        map_obs = map_obs.view(-1, Config.MAP_CHANNEL, Config.MAP_SIZE, Config.MAP_SIZE)
+        obs = torch.stack([f.obs for f in list_sample_data]).to(self.device)
         legal_action = torch.stack([f.legal_action for f in list_sample_data]).to(self.device)
         act = torch.stack([f.act for f in list_sample_data]).to(self.device).view(-1, 1)
         old_prob = torch.stack([f.prob for f in list_sample_data]).to(self.device)
@@ -58,12 +56,10 @@ class Algorithm:
         old_value = torch.stack([f.value for f in list_sample_data]).to(self.device)
         reward_sum = torch.stack([f.reward_sum for f in list_sample_data]).to(self.device)
 
-
-        advantage = (advantage - advantage.mean()) / advantage.std().clamp_min(1e-8)
         self.model.set_train_mode()
         self.optimizer.zero_grad()
 
-        logits, value_pred = self.model(vector_obs, map_obs)
+        logits, value_pred = self.model(obs)
 
         total_loss, info_list = self._compute_loss(
             logits=logits,
@@ -83,13 +79,16 @@ class Algorithm:
         self.train_step += 1
 
         now = time.time()
-        if now - self.last_report_monitor_time >= 20:
+        if now - self.last_report_monitor_time >= 60:
             results = {
                 "total_loss": round(total_loss.item(), 4),
                 "value_loss": round(info_list[0].item(), 4),
                 "policy_loss": round(info_list[1].item(), 4),
                 "entropy_loss": round(info_list[2].item(), 4),
                 "reward": round(reward.mean().item(), 4),
+                "adv_mean": round(advantage.mean().item(), 4),
+                "adv_std": round(advantage.std(unbiased=False).item(), 4),
+                "value_mean": round(old_value.mean().item(), 4),
             }
             self.logger.info(
                 f"[train] total_loss:{results['total_loss']} "
@@ -126,6 +125,7 @@ class Algorithm:
         old_action_prob = (one_hot * old_prob).sum(1, keepdim=True).clamp(1e-9)
         ratio = new_prob / old_action_prob
         adv = advantage.view(-1, 1)
+        adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
         policy_loss1 = -ratio * adv
         policy_loss2 = -ratio.clamp(1 - self.clip_param, 1 + self.clip_param) * adv
         policy_loss = torch.maximum(policy_loss1, policy_loss2).mean()

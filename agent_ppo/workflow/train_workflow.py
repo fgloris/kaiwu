@@ -4,15 +4,15 @@
 # Copyright © 1998 - 2026 Tencent. All Rights Reserved.
 ###########################################################################
 """
-Author: Tencent AI Arena Authors
-
-Training workflow for Gorge Chase PPO.
-峡谷追猎 PPO 训练工作流。
+Training workflow for Gorge Chase PPO V6.
+结合高分经验补上：train/val split、2k 截断 bootstrap、训练分布更贴近比赛高压阶段。
 """
 
 import copy
 import os
+import random
 import time
+from collections import defaultdict
 
 import numpy as np
 from agent_ppo.conf.conf import Config
@@ -21,396 +21,261 @@ from tools.metrics_utils import get_training_metrics
 from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
 
+
 def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     last_save_model_time = time.time()
     env = envs[0]
     agent = agents[0]
 
-    # Read user config / 读取用户配置
-    train_usr_conf = read_usr_conf("agent_ppo/conf/train_env_conf.toml", logger)
-    if train_usr_conf is None:
-        logger.error("train_usr_conf is None, please check agent_ppo/conf/train_env_conf.toml")
+    base_usr_conf = read_usr_conf("agent_ppo/conf/train_env_conf.toml", logger)
+    if base_usr_conf is None:
+        logger.error("usr_conf is None, please check agent_ppo/conf/train_env_conf.toml")
         return
 
-    val_usr_conf = read_usr_conf("agent_ppo/conf/val_env_conf.toml", logger)
-    if val_usr_conf is None:
-        logger.error("val_usr_conf is None, please check agent_ppo/conf/val_env_conf.toml")
-        return
-
-    episode_runner = EpisodeRunner(
-        env=env,
-        agent=agent,
-        train_usr_conf=train_usr_conf,
-        val_usr_conf=val_usr_conf,
-        logger=logger,
-        monitor=monitor,
-    )
+    episode_runner = EpisodeRunner(env=env, agent=agent, base_usr_conf=base_usr_conf, logger=logger, monitor=monitor)
 
     while True:
         for g_data in episode_runner.run_episodes():
             agent.send_sample_data(g_data)
             g_data.clear()
-
             now = time.time()
-            if now - last_save_model_time >= 300:
+            if now - last_save_model_time >= 1800:
                 agent.save_model()
                 last_save_model_time = now
 
 
 class EpisodeRunner:
-    def __init__(self, env, agent, train_usr_conf, val_usr_conf, logger, monitor):
+    def __init__(self, env, agent, base_usr_conf, logger, monitor):
         self.env = env
         self.agent = agent
-        self.train_usr_conf = train_usr_conf
-        self.val_usr_conf = val_usr_conf
+        self.base_usr_conf = base_usr_conf
         self.logger = logger
         self.monitor = monitor
         self.episode_cnt = 0
         self.last_report_monitor_time = 0
         self.last_get_training_metrics_time = 0
+        self.last_val_stats = None
 
-        self.monitor_report_interval = 2.0
-        self.val_every_n_episode = 40
-        self.val_episode_num = 10
-        self.train_score_window = []
-        
-    def _append_train_score_window(self, total_score, treasure_score, step_score):
-        self.train_score_window.append({
-            "total_score": float(total_score),
-            "treasure_score": float(treasure_score),
-            "step_score": float(step_score),
-        })
+    def _sample_range(self, lo, hi):
+        return lo if lo == hi else random.randint(lo, hi)
 
-    def _report_train_monitor_if_needed(self, now, reward_value, step, episode_reward_vec_sum, reward_vec_keys, force=False):
-        if not self.monitor:
-            return
-        if not force and now - self.last_report_monitor_time < self.monitor_report_interval:
-            return
-        if not self.train_score_window:
-            return
+    def _build_train_usr_conf(self):
+        usr_conf = copy.deepcopy(self.base_usr_conf)
+        env_conf = usr_conf.setdefault("env_conf", {})
+        env_conf["map"] = list(Config.TRAIN_MAPS)
+        env_conf["map_random"] = True
 
-        total_scores = np.asarray([x["total_score"] for x in self.train_score_window], dtype=np.float32)
-        treasure_scores = np.asarray([x["treasure_score"] for x in self.train_score_window], dtype=np.float32)
-        step_scores = np.asarray([x["step_score"] for x in self.train_score_window], dtype=np.float32)
+        ep = self.episode_cnt
+        if ep < 150:
+            env_conf["treasure_count"] = self._sample_range(9, 10)
+            env_conf["buff_count"] = 2
+            env_conf["monster_interval"] = self._sample_range(220, 300)
+            env_conf["monster_speedup"] = self._sample_range(360, 460)
+            env_conf["max_step"] = 2000
+        elif ep < 500:
+            env_conf["treasure_count"] = self._sample_range(8, 10)
+            env_conf["buff_count"] = self._sample_range(1, 2)
+            env_conf["monster_interval"] = self._sample_range(160, 280)
+            env_conf["monster_speedup"] = self._sample_range(240, 420)
+            env_conf["max_step"] = 2000
+        elif ep < 900:
+            env_conf["treasure_count"] = self._sample_range(7, 10)
+            env_conf["buff_count"] = self._sample_range(1, 2)
+            env_conf["monster_interval"] = self._sample_range(120, 220)
+            env_conf["monster_speedup"] = self._sample_range(180, 320)
+            env_conf["max_step"] = 2000
+        else:
+            env_conf["treasure_count"] = self._sample_range(6, 10)
+            env_conf["buff_count"] = self._sample_range(0, 2)
+            env_conf["monster_interval"] = self._sample_range(120, 320)
+            env_conf["monster_speedup"] = self._sample_range(140, 420)
+            env_conf["max_step"] = 2000
 
-        monitor_data = {
-            "reward": round(float(reward_value), 4),
-            "episode_steps": int(step),
-            "episode_cnt": int(self.episode_cnt),
-            "train_avg_total_score": round(float(np.mean(total_scores)), 4),
-            "train_avg_treasure_score": round(float(np.mean(treasure_scores)), 4),
-            "train_avg_step_score": round(float(np.mean(step_scores)), 4),
-            "train_min_total_score": round(float(np.min(total_scores)), 4),
-            "train_min_treasure_score": round(float(np.min(treasure_scores)), 4),
-            "train_min_step_score": round(float(np.min(step_scores)), 4),
-        }
-        for i, key in enumerate(reward_vec_keys):
-            monitor_data[key] = round(float(episode_reward_vec_sum[i]), 4)
+        env_conf["buff_cooldown"] = int(env_conf.get("buff_cooldown", 200))
+        env_conf["talent_cooldown"] = int(env_conf.get("talent_cooldown", 100))
+        return usr_conf
 
-        self.monitor.put_data({os.getpid(): monitor_data})
-        self.last_report_monitor_time = now
-        self.train_score_window.clear()
+    def _build_val_usr_conf(self):
+        usr_conf = copy.deepcopy(self.base_usr_conf)
+        env_conf = usr_conf.setdefault("env_conf", {})
+        env_conf["map"] = list(Config.VAL_MAPS)
+        env_conf["map_random"] = True
+        env_conf["treasure_count"] = 10
+        env_conf["buff_count"] = 2
+        env_conf["buff_cooldown"] = int(env_conf.get("buff_cooldown", 200))
+        env_conf["talent_cooldown"] = int(env_conf.get("talent_cooldown", 100))
+        env_conf["monster_interval"] = 300
+        env_conf["monster_speedup"] = 500
+        env_conf["max_step"] = 2000
+        return usr_conf
 
-    def _make_eval_conf(self, map_ids):
-        eval_conf = copy.deepcopy(self.val_usr_conf)
-        if isinstance(eval_conf, dict):
-            if "env_conf" in eval_conf and isinstance(eval_conf["env_conf"], dict):
-                eval_conf["env_conf"]["map"] = list(map_ids)
-                eval_conf["env_conf"]["map_random"] = False
-            else:
-                eval_conf["map"] = list(map_ids)
-                eval_conf["map_random"] = False
-        return eval_conf
-
-    def _set_learning_rate_scale(self, scale):
-        optimizer = getattr(self.agent, "optimizer", None)
-        if optimizer is None:
-            return False
-
-        lr = float(Config.INIT_LEARNING_RATE_START) * float(scale)
-        for param_group in optimizer.param_groups:
-            param_group["lr"] = lr
-
-        self.logger.warning(
-            f"[LR] eval_12 score reached threshold, set learning rate to {lr:.8f} "
-            f"({scale:.0%} of initial lr)"
+    def _make_frame(self, obs_data, act_data, reward, done_flag):
+        return SampleData(
+            obs=np.array(obs_data.feature, dtype=np.float32),
+            legal_action=np.array(obs_data.legal_action, dtype=np.float32),
+            act=np.array([act_data.action[0]], dtype=np.float32),
+            reward=np.array(reward, dtype=np.float32),
+            done=np.array([float(done_flag)], dtype=np.float32),
+            reward_sum=np.zeros(1, dtype=np.float32),
+            value=np.array(act_data.value, dtype=np.float32).reshape(-1)[:1],
+            next_value=np.zeros(1, dtype=np.float32),
+            advantage=np.zeros(1, dtype=np.float32),
+            prob=np.array(act_data.prob, dtype=np.float32),
         )
-        return True
 
-    def _get_life_step_terminal_bonus(self, step):
-        step = int(step)
-        if step < 100:
-            return -20.0
-        if step < 200:
-            return -10.0
-        if step < 300:
-            return 0.0
-        if step < 400:
-            return 10.0
-        return 20.0
+    def _play_episode(self, training=True):
+        usr_conf = self._build_train_usr_conf() if training else self._build_val_usr_conf()
+        env_obs = self.env.reset(usr_conf)
+        if handle_disaster_recovery(env_obs, self.logger):
+            return None, None
+
+        self.agent.reset(env_obs)
+        self.agent.load_model(id="latest")
+        obs_data, _ = self.agent.observation_process(env_obs)
+
+        collector = []
+        done = False
+        step = 0
+        total_reward = 0.0
+        reward_component_sums = defaultdict(float)
+
+        while not done:
+            if training:
+                act_data = self.agent.predict([obs_data])[0]
+                act = self.agent.action_process(act_data, is_stochastic=True)
+            else:
+                act_data = self.agent.predict([obs_data])[0]
+                act = self.agent.action_process(act_data, is_stochastic=False)
+
+            env_reward, env_obs = self.env.step(act)
+            if handle_disaster_recovery(env_obs, self.logger):
+                return None, None
+
+            terminated = bool(env_obs["terminated"])
+            truncated = bool(env_obs["truncated"])
+            step += 1
+            done = terminated or truncated
+
+            next_obs_data, next_remain_info = self.agent.observation_process(env_obs)
+            reward = np.array(next_remain_info.get("reward", [0.0]), dtype=np.float32)
+            total_reward += float(reward[0])
+            reward_components = next_remain_info.get("reward_components", {}) or {}
+            for key, value in reward_components.items():
+                if key == "total_reward":
+                    continue
+                reward_component_sums[key] += float(value)
+
+            if training:
+                collector.append(self._make_frame(obs_data, act_data, reward, done_flag=terminated))
+
+            if done:
+                env_info = env_obs["observation"]["env_info"]
+                total_score = float(env_info.get("total_score", 0.0))
+                step_score = float(env_info.get("step_score", 0.0))
+                treasure_score = float(env_info.get("treasure_score", 0.0))
+                result_str = "FAIL" if terminated else "WIN"
+
+                # 终局奖励只保留较小常数，避免压过中间过程的 reward 主体。
+                final_reward = 0.0
+                if terminated:
+                    final_reward = -2.0
+                else:
+                    final_reward = 1.0
+
+                reward_component_sums["terminal_reward"] += float(final_reward)
+
+                if training and collector:
+                    collector[-1].reward = collector[-1].reward + np.array([final_reward], dtype=np.float32)
+                    if truncated and not terminated and step >= int(usr_conf["env_conf"].get("max_step", 2000)):
+                        bootstrap_value = self.agent.estimate_value(next_obs_data)
+                        collector[-1].next_value = np.array([bootstrap_value], dtype=np.float32)
+                        collector[-1].done = np.array([0.0], dtype=np.float32)
+                    else:
+                        collector[-1].next_value = np.zeros(1, dtype=np.float32)
+                        collector[-1].done = np.array([1.0], dtype=np.float32)
+
+                self.logger.info(
+                    f"[GAMEOVER] episode:{self.episode_cnt} mode:{'train' if training else 'val'} steps:{step} "
+                    f"result:{result_str} sim_score:{total_score:.1f} total_reward:{total_reward:.3f}"
+                )
+
+                stats = {
+                    "mode": "train" if training else "val",
+                    "steps": step,
+                    "reward": round(total_reward + final_reward, 4),
+                    "total_score": round(total_score, 2),
+                    "step_score": round(step_score, 2),
+                    "treasure_score": round(treasure_score, 2),
+                    "treasures_collected": int(env_info.get("treasures_collected", 0)),
+                    "flash_count": int(env_info.get("flash_count", 0)),
+                    "win": 0 if terminated else 1,
+                    "reward_components": {k: round(v, 4) for k, v in reward_component_sums.items()},
+                }
+                return stats, collector
+
+            obs_data = next_obs_data
+
+        return None, collector
+
+    def _report_monitor(self, train_stats):
+        if not self.monitor or train_stats is None:
+            return
+        now = time.time()
+        if now - self.last_report_monitor_time < 60:
+            return
+        data = {
+            "train_reward": train_stats["reward"],
+            "train_total_score": train_stats["total_score"],
+            "train_step_score": train_stats["step_score"],
+            "train_treasure_score": train_stats["treasure_score"],
+            "train_steps": train_stats["steps"],
+            "train_treasures_collected": train_stats["treasures_collected"],
+            "train_flash_count": train_stats["flash_count"],
+            "train_win_rate": train_stats["win"],
+            "episode_cnt": self.episode_cnt,
+        }
+        for key, value in train_stats.get("reward_components", {}).items():
+            data[f"train_{key}"] = value
+
+        if self.last_val_stats is not None:
+            data.update({
+                "val_total_score": self.last_val_stats["total_score"],
+                "val_step_score": self.last_val_stats["step_score"],
+                "val_treasure_score": self.last_val_stats["treasure_score"],
+                "val_steps": self.last_val_stats["steps"],
+                "val_win_rate": self.last_val_stats["win"],
+                "generalization_gap_total": round(train_stats["total_score"] - self.last_val_stats["total_score"], 4),
+            })
+            for key, value in self.last_val_stats.get("reward_components", {}).items():
+                data[f"val_{key}"] = value
+        self.monitor.put_data({os.getpid(): data})
+        self.last_report_monitor_time = now
 
     def run_episodes(self):
-        """Run a single episode and yield collected samples.
-
-        执行单局对局并 yield 训练样本。
-        """
         while True:
-            # Periodically fetch training metrics / 定期获取训练指标
             now = time.time()
-            if now - self.last_get_training_metrics_time >= 20:
+            if now - self.last_get_training_metrics_time >= 60:
                 training_metrics = get_training_metrics()
                 self.last_get_training_metrics_time = now
                 if training_metrics is not None:
                     self.logger.info(f"training_metrics is {training_metrics}")
 
-            collector = []
             self.episode_cnt += 1
-
-            # Reset env / 重置环境
-            env_obs = self.env.reset(self.train_usr_conf)
-
-            # Disaster recovery / 容灾处理
-            if handle_disaster_recovery(env_obs, self.logger):
+            train_stats, collector = self._play_episode(training=True)
+            if train_stats is None:
                 continue
 
-            # Reset agent & load latest model / 重置 Agent 并加载最新模型
-            if hasattr(self.agent, "preprocessor") and hasattr(self.agent.preprocessor, "set_curriculum_episode"):
-                self.agent.preprocessor.set_curriculum_episode(self.episode_cnt)
-            self.agent.reset(env_obs)
-            self.agent.load_model(id="latest")
-
-            # Initial observation / 初始观测处理
-            obs_data, remain_info = self.agent.observation_process(env_obs)
-            done = False
-            step = 0
-            total_reward = 0.0
-            reward_vec_keys = [
-                "r_score_gain_sum",
-                "r_survival_gain_sum",
-                "r_monster_los_break_sum",
-                "r_flash_sum",
-                "r_wall_penalty_sum",
-                "r_abb_penalty_sum",
-                "r_danger_penalty_sum",
-                "r_treasure_dist_sum",
-                "r_buff_dist_sum",
-                "r_buff_pick_sum",
-                "r_monster_dist_sum",
-            ]
-            episode_reward_vec_sum = np.zeros(len(reward_vec_keys), dtype=np.float32)
-
-            self.logger.info(f"Episode {self.episode_cnt} start")
-
-            while not done:
-                # Predict action / Agent 推理（随机采样）
-                act_data = self.agent.predict(list_obs_data=[obs_data])[0]
-                act = self.agent.action_process(act_data)
-
-                # Step env / 与环境交互
-                env_reward, env_obs = self.env.step(act)
-
-                # Disaster recovery / 容灾处理
-                if handle_disaster_recovery(env_obs, self.logger):
-                    break
-
-                terminated = env_obs["terminated"]
-                truncated = env_obs["truncated"]
-                step += 1
-                done = terminated or truncated
-
-                # Next observation / 处理下一步观测
-                _obs_data, _remain_info = self.agent.observation_process(env_obs)
-
-                # Step reward / 每步即时奖励
-                reward = np.array(_remain_info.get("reward", [0.0]), dtype=np.float32)
-                reward_vector = np.array(_remain_info.get("reward_vector", [0.0] * len(reward_vec_keys)), dtype=np.float32)
-                if reward_vector.shape[0] != len(reward_vec_keys):
-                    aligned_reward_vector = np.zeros(len(reward_vec_keys), dtype=np.float32)
-                    copy_n = min(len(reward_vec_keys), reward_vector.shape[0])
-                    aligned_reward_vector[:copy_n] = reward_vector[:copy_n]
-                    reward_vector = aligned_reward_vector
-                episode_reward_vec_sum += reward_vector
-                total_reward += float(reward[0])
-
-                # Terminal reward / 终局奖励
-                final_reward = np.zeros(1, dtype=np.float32)
-                if done:
-                    env_info = env_obs["observation"]["env_info"]
-                    total_score = env_info.get("total_score", 0)
-                    life_step_bonus = self._get_life_step_terminal_bonus(step)
-
-                    if terminated:
-                        final_reward[0] = -10.0
-                        result_str = "FAIL"
-                    else:
-                        final_reward[0] = 10.0 + 0.01 * total_score
-                        result_str = "WIN"
-                    final_reward[0] += life_step_bonus
-
+            if self.episode_cnt % Config.VAL_EVERY_EPISODES == 0:
+                val_stats, _ = self._play_episode(training=False)
+                if val_stats is not None:
+                    self.last_val_stats = val_stats
                     self.logger.info(
-                        f"[GAMEOVER] episode:{self.episode_cnt} steps:{step} "
-                        f"result:{result_str} sim_score:{total_score:.1f} "
-                        f"life_step_bonus:{life_step_bonus:.1f} "
-                        f"total_reward:{total_reward:.3f}"
+                        f"[VAL] episode:{self.episode_cnt} total:{val_stats['total_score']} "
+                        f"step:{val_stats['step_score']} treasure:{val_stats['treasure_score']} win:{val_stats['win']}"
                     )
 
-                # Build sample frame / 构造样本帧
-                frame = SampleData(
-                    vector_obs = np.array(obs_data.vector_feature, dtype=np.float32),
-                    map_obs = np.array(obs_data.map_feature, dtype=np.float32),
-                    legal_action=np.array(obs_data.legal_action, dtype=np.float32),
-                    act=np.array([act_data.action[0]], dtype=np.float32),
-                    reward=reward,
-                    done=np.array([float(done)], dtype=np.float32),
-                    reward_sum=np.zeros(1, dtype=np.float32),
-                    value=np.array(act_data.value, dtype=np.float32).flatten()[:1],
-                    next_value=np.zeros(1, dtype=np.float32),
-                    advantage=np.zeros(1, dtype=np.float32),
-                    prob=np.array(act_data.prob, dtype=np.float32),
-                )
-                collector.append(frame)
+            self._report_monitor(train_stats)
 
-                # Episode end / 对局结束
-                if done:
-                    if collector:
-                        collector[-1].reward = collector[-1].reward + final_reward
-
-                    # Monitor report / 监控上报
-                    now = time.time()
-                    train_total_score = float(env_info.get("total_score", 0.0))
-                    train_treasure_score = float(env_info.get("treasure_score", 0.0))
-                    train_step_score = float(env_info.get("step_score", 0.0))
-
-                    self._append_train_score_window(
-                        train_total_score,
-                        train_treasure_score,
-                        train_step_score,
-                    )
-                    self._report_train_monitor_if_needed(
-                        now=now,
-                        reward_value=total_reward + float(final_reward[0]),
-                        step=step,
-                        episode_reward_vec_sum=episode_reward_vec_sum,
-                        reward_vec_keys=reward_vec_keys,
-                    )
-
-                    if self.episode_cnt % self.val_every_n_episode == 0:
-                        self.logger.info(f"[VAL] start validation at episode {self.episode_cnt}")
-                        self.run_validation()
-
-                    if collector:
-                        collector = sample_process(collector)
-                        yield collector
-                    break
-
-                # Update state / 状态更新
-                obs_data = _obs_data
-                remain_info = _remain_info
-
-    def run_one_eval_episode(self, eval_conf=None):
-        if eval_conf is None:
-            eval_conf = self.val_usr_conf
-        env_obs = self.env.reset(eval_conf)
-
-        if handle_disaster_recovery(env_obs, self.logger):
-            return None
-
-        self.agent.reset(env_obs)
-        self.agent.load_model(id="latest")
-
-        done = False
-        step = 0
-        while not done:
-            act = self.agent.exploit(env_obs)
-            env_reward, env_obs = self.env.step(act)
-
-            if handle_disaster_recovery(env_obs, self.logger):
-                return None
-
-            terminated = env_obs["terminated"]
-            truncated = env_obs["truncated"]
-            done = terminated or truncated
-            step += 1
-
-        env_info = env_obs["observation"]["env_info"]
-
-        result = {
-            "steps": step,
-            "total_score": float(env_info.get("total_score", 0.0)),
-            "treasure_score": float(env_info.get("treasure_score", 0.0)),
-            "step_score": float(env_info.get("step_score", 0.0)),
-            "treasures_collected": int(env_info.get("treasures_collected", 0)),
-            "collected_buff": int(env_info.get("collected_buff", 0)),
-            "flash_count": int(env_info.get("flash_count", 0)),
-            "terminated": bool(env_obs["terminated"]),
-            "truncated": bool(env_obs["truncated"]),
-        }
-        return result
-    
-    def _run_validation_group(self, map_ids, metric_prefix):
-        eval_conf = self._make_eval_conf(map_ids)
-        results = []
-
-        for _ in range(self.val_episode_num):
-            r = self.run_one_eval_episode(eval_conf=eval_conf)
-            if r is not None:
-                results.append(r)
-
-        if not results:
-            self.logger.info(f"[VAL-{metric_prefix}] no valid results for maps {map_ids}")
-            return None
-
-        total_scores = np.asarray([x["total_score"] for x in results], dtype=np.float32)
-        treasure_scores = np.asarray([x["treasure_score"] for x in results], dtype=np.float32)
-        step_scores = np.asarray([x["step_score"] for x in results], dtype=np.float32)
-
-        avg_total_score = np.mean(total_scores)
-        avg_treasure_score = np.mean(treasure_scores)
-        avg_step_score = np.mean(step_scores)
-        min_total_score = np.min(total_scores)
-        min_treasure_score = np.min(treasure_scores)
-        min_step_score = np.min(step_scores)
-
-        avg_steps = np.mean([x["steps"] for x in results])
-        avg_treasures = np.mean([x["treasures_collected"] for x in results])
-        avg_buffs = np.mean([x["collected_buff"] for x in results])
-        avg_flash = np.mean([x["flash_count"] for x in results])
-        term_rate = np.mean([1.0 if x["terminated"] else 0.0 for x in results])
-
-        self.logger.info(
-            f"[VAL-{metric_prefix}] maps:{map_ids} episodes:{len(results)} "
-            f"avg_total_score:{avg_total_score:.2f} "
-            f"avg_treasure_score:{avg_treasure_score:.2f} "
-            f"avg_step_score:{avg_step_score:.2f} "
-            f"min_total_score:{min_total_score:.2f} "
-            f"min_treasure_score:{min_treasure_score:.2f} "
-            f"min_step_score:{min_step_score:.2f} "
-            f"avg_steps:{avg_steps:.2f} "
-            f"avg_treasures:{avg_treasures:.2f} "
-            f"avg_buffs:{avg_buffs:.2f} "
-            f"avg_flash:{avg_flash:.2f} "
-            f"terminated_rate:{term_rate:.2%}"
-        )
-
-        return {
-            f"{metric_prefix}_total_score": round(float(avg_total_score), 4),
-            f"{metric_prefix}_treasure_score": round(float(avg_treasure_score), 4),
-            f"{metric_prefix}_step_score": round(float(avg_step_score), 4),
-            f"{metric_prefix}_min_total_score": round(float(min_total_score), 4),
-            f"{metric_prefix}_min_treasure_score": round(float(min_treasure_score), 4),
-            f"{metric_prefix}_min_step_score": round(float(min_step_score), 4),
-        }
-
-    def run_validation(self):
-        monitor_data = {}
-
-        eval_12 = self._run_validation_group([1, 2], "eval_12")
-        if eval_12 is not None:
-            monitor_data.update(eval_12)
-
-        eval_910 = self._run_validation_group([9, 10], "eval_910")
-        if eval_910 is not None:
-            monitor_data.update(eval_910)
-
-        if self.monitor and monitor_data:
-            self.monitor.put_data({os.getpid(): monitor_data})
+            if collector:
+                collector = sample_process(collector)
+                yield collector
