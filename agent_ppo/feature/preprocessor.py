@@ -1303,12 +1303,12 @@ class Preprocessor:
 
         # 在 passable layer 上叠加自身最近轨迹
         recent_self_path = list(self.pos_history) + [(int(hero_pos["x"]), int(hero_pos["z"]))]
-        #_paint_recent_positions_on_passable(
-        #    map_feat[0],
-        #    recent_self_path,
-        #    gx0=gx0,
-        #    gy0=gy0,
-        #)
+        _paint_recent_positions_on_passable(
+            map_feat[0],
+            recent_self_path,
+            gx0=gx0,
+            gy0=gy0,
+        )
 
         # 第二层：monster mask
         # 规则：
@@ -1383,7 +1383,7 @@ class Preprocessor:
             radius=3,
         )
         boundary_cluster_feat, boundary_cluster_info = self._compute_boundary_cluster_direction_scores(
-            local_passable_21
+            local_passable_21_masked
         )
         connected_opening_count_raw = int(boundary_cluster_info["connected_opening_count"])
         connected_opening_count = _norm(connected_opening_count_raw, 5)
@@ -1407,7 +1407,7 @@ class Preprocessor:
                 monster_feats[0],
                 monster_feats[1],
                 ray_collision_feat,
-                #boundary_cluster_feat,
+                boundary_cluster_feat,
                 treasure_feat,
                 buff_feat,
                 legal_action_feat,

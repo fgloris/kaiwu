@@ -18,7 +18,7 @@ class Config:
         7,   # monster1
         7,   # monster2
         8,   # ray collision
-        #8,   # boundery cluster
+        8,   # boundery cluster
         8,  # nearest 2 treasures
         8,  # 2 buffs
         16,  # legal action mask
