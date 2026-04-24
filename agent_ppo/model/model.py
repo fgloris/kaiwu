@@ -10,18 +10,31 @@ def make_fc_layer(in_features, out_features):
     return fc
 
 
+def make_conv_layer(in_channels, out_channels, kernel_size=3, padding=1):
+    conv = nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding)
+    nn.init.orthogonal_(conv.weight.data)
+    nn.init.zeros_(conv.bias.data)
+    return conv
+
+
+def make_mlp(dims, dropout_p=0.0):
+    layers = []
+    for idx in range(len(dims) - 1):
+        layers.append(make_fc_layer(dims[idx], dims[idx + 1]))
+        if idx < len(dims) - 2:
+            layers.append(nn.ReLU())
+            if dropout_p > 0:
+                layers.append(nn.Dropout(dropout_p))
+    return nn.Sequential(*layers)
+
+
 class ResidualBlock(nn.Module):
     def __init__(self, channels, dropout_p=0.0):
         super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, 3, padding=1)
-        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
+        self.conv1 = make_conv_layer(channels, channels, 3, padding=1)
+        self.conv2 = make_conv_layer(channels, channels, 3, padding=1)
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout2d(p=dropout_p) if dropout_p > 0 else nn.Identity()
-
-        nn.init.orthogonal_(self.conv1.weight.data)
-        nn.init.zeros_(self.conv1.bias.data)
-        nn.init.orthogonal_(self.conv2.weight.data)
-        nn.init.zeros_(self.conv2.bias.data)
 
     def forward(self, x):
         out = self.relu(self.conv1(x))
@@ -33,102 +46,106 @@ class ResidualBlock(nn.Module):
 class Model(nn.Module):
     def __init__(self, device=None):
         super().__init__()
-        self.model_name = "gorge_chase_cnn_v2"
+        self.model_name = "gorge_chase_cnn_v3"
         self.device = device
 
-        vector_dim = Config.VECTOR_FEATURE_LEN
         action_num = Config.ACTION_NUM
         value_num = Config.VALUE_NUM
+        vector_layout = Config.VECTOR_FEATURES
+        if vector_layout != [4, 7, 7, 8, 8, 8, 16, 4, 2]:
+            raise ValueError(f"Unexpected VECTOR_FEATURES layout: {vector_layout}")
 
-        # dropout 配置
         self.vec_dropout_p = 0.10
         self.map_dropout_p = 0.10
         self.fusion_dropout_p = 0.10
         self.head_dropout_p = 0.10
 
-        self.vector_encoder = nn.Sequential(
-            make_fc_layer(vector_dim, 128),
-            nn.ReLU(),
-            nn.Dropout(self.vec_dropout_p),
-            make_fc_layer(128, 128),
-            nn.ReLU(),
-            nn.Dropout(self.vec_dropout_p),
-        )
+        self.self_encoder = make_mlp([10, 32, 32], dropout_p=self.vec_dropout_p)
+        self.monster_encoder = make_mlp([7, 32, 32], dropout_p=self.vec_dropout_p)
+        self.target_encoder = make_mlp([4, 16, 16], dropout_p=self.vec_dropout_p)
+        self.ray_encoder = make_mlp([8, 16, 16], dropout_p=self.vec_dropout_p)
+        self.legal_encoder = make_mlp([16, 32, 32], dropout_p=self.vec_dropout_p)
+        self.vector_fusion = make_mlp([208, 256, 128], dropout_p=self.fusion_dropout_p)
 
         self.map_stem = nn.Sequential(
-            nn.Conv2d(Config.MAP_CHANNEL, 32, 3, padding=1),
+            make_conv_layer(Config.MAP_CHANNEL, 32, 3, padding=1),
             nn.ReLU(),
             nn.Dropout2d(self.map_dropout_p),
         )
-        nn.init.orthogonal_(self.map_stem[0].weight.data)
-        nn.init.zeros_(self.map_stem[0].bias.data)
 
         self.map_stage1 = nn.Sequential(
             ResidualBlock(32, dropout_p=self.map_dropout_p),
-            nn.MaxPool2d(2),   # 21 -> 10
+            nn.MaxPool2d(2),
         )
 
         self.map_stage2 = nn.Sequential(
-            nn.Conv2d(32, 64, 3, padding=1),
+            make_conv_layer(32, 64, 3, padding=1),
             nn.ReLU(),
             nn.Dropout2d(self.map_dropout_p),
             ResidualBlock(64, dropout_p=self.map_dropout_p),
-            nn.MaxPool2d(2),   # 10 -> 5
+            nn.MaxPool2d(2),
         )
-        nn.init.orthogonal_(self.map_stage2[0].weight.data)
-        nn.init.zeros_(self.map_stage2[0].bias.data)
 
         self.map_stage3 = nn.Sequential(
-            nn.Conv2d(64, 128, 3, padding=1),
+            make_conv_layer(64, 128, 3, padding=1),
             nn.ReLU(),
             nn.Dropout2d(self.map_dropout_p),
             ResidualBlock(128, dropout_p=self.map_dropout_p),
         )
-        nn.init.orthogonal_(self.map_stage3[0].weight.data)
-        nn.init.zeros_(self.map_stage3[0].bias.data)
 
-        self.map_pool = nn.AdaptiveAvgPool2d((3, 3))
-        self.map_fc = nn.Sequential(
-            make_fc_layer(128 * 3 * 3, 128),
-            nn.ReLU(),
-            nn.Dropout(self.map_dropout_p),
-        )
+        self.map_pool = nn.AdaptiveAvgPool2d((2, 2))
+        self.map_fc = make_mlp([128 * 2 * 2, 128], dropout_p=0.0)
 
-        self.fusion = nn.Sequential(
-            make_fc_layer(256, 256),
-            nn.ReLU(),
-            nn.Dropout(self.fusion_dropout_p),
-            make_fc_layer(256, 256),
-            nn.ReLU(),
-            nn.Dropout(self.fusion_dropout_p),
-        )
-
-        self.actor_head = nn.Sequential(
-            make_fc_layer(256, 256),
-            nn.ReLU(),
-            make_fc_layer(256, 128),
-            nn.ReLU(),
-            make_fc_layer(128, action_num),
-        )
+        self.fusion = make_mlp([256, 256, 128], dropout_p=self.fusion_dropout_p)
+        self.actor_head = make_mlp([128, 128, action_num], dropout_p=0.0)
 
         self.critic_head = nn.Sequential(
-            make_fc_layer(256, 256),
-            nn.ReLU(),
-            nn.Dropout(self.head_dropout_p),
-            make_fc_layer(256, 128),
+            make_fc_layer(128, 128),
             nn.ReLU(),
             nn.Dropout(self.head_dropout_p),
             make_fc_layer(128, value_num),
         )
 
-        self.move_bias_head = nn.Sequential(
-            make_fc_layer(128, 64),
-            nn.ReLU(),
-            make_fc_layer(64, 8),
+        self.move_bias_head = make_mlp([128, 64, 8], dropout_p=0.0)
+
+    def _encode_vector_obs(self, vector_obs):
+        hero_feat = vector_obs[:, 0:4]
+        monster1_feat = vector_obs[:, 4:11]
+        monster2_feat = vector_obs[:, 11:18]
+        ray_feat = vector_obs[:, 18:26]
+        treasure_feat = vector_obs[:, 26:34]
+        buff_feat = vector_obs[:, 34:42]
+        legal_feat = vector_obs[:, 42:58]
+        progress_feat = vector_obs[:, 58:62]
+        situation_feat = vector_obs[:, 62:64]
+
+        shared_state_feat = torch.cat([hero_feat, progress_feat, situation_feat], dim=1)
+        shared_state_hidden = self.self_encoder(shared_state_feat)
+
+        monster1_hidden = self.monster_encoder(monster1_feat)
+        monster2_hidden = self.monster_encoder(monster2_feat)
+        monster_hidden = torch.cat([monster1_hidden, monster2_hidden], dim=1)
+
+        treasure1_hidden = self.target_encoder(treasure_feat[:, 0:4])
+        treasure2_hidden = self.target_encoder(treasure_feat[:, 4:8])
+        buff1_hidden = self.target_encoder(buff_feat[:, 0:4])
+        buff2_hidden = self.target_encoder(buff_feat[:, 4:8])
+        target_hidden = torch.cat(
+            [treasure1_hidden, treasure2_hidden, buff1_hidden, buff2_hidden],
+            dim=1,
         )
 
+        ray_hidden = self.ray_encoder(ray_feat)
+        legal_hidden = self.legal_encoder(legal_feat)
+
+        vector_hidden = torch.cat(
+            [shared_state_hidden, monster_hidden, target_hidden, ray_hidden, legal_hidden],
+            dim=1,
+        )
+        return self.vector_fusion(vector_hidden)
+
     def forward(self, vector_obs, map_obs, inference=False):
-        vector_hidden = self.vector_encoder(vector_obs)
+        vector_hidden = self._encode_vector_obs(vector_obs)
 
         x = self.map_stem(map_obs)
         x = self.map_stage1(x)

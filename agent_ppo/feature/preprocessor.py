@@ -686,6 +686,16 @@ class Preprocessor:
             return ray_collision_scores, debug_infos, global_rays
         return ray_collision_scores
 
+    def _ray_collision_raw_scores(self, hero_x, hero_z):
+        """Return raw 24-direction ray collision scores without directional pooling."""
+        global_rays = self._compute_global_rays(
+            start_x=hero_x,
+            start_z=hero_z,
+            max_len=18,
+            step_size=1.0,
+        )
+        return np.asarray([float(ray["score"]) for ray in global_rays], dtype=np.float32)
+
 
     def _extract_local_passable_patch(self, map_info):
         """
@@ -1196,10 +1206,9 @@ class Preprocessor:
                 value = max(float(map_feat[2, center_i, center_j]) if 0 <= center_i < VIEW_MAP_SIZE and 0 <= center_j < VIEW_MAP_SIZE else 0.0, 0.4)
                 _paint_square(map_feat[2], center_i, center_j, radius=1, value=value)
 
-        ray_collision_feat = self._ray_collision_direction_scores(
+        ray_collision_feat = self._ray_collision_raw_scores(
             hero_pos["x"],
             hero_pos["z"],
-            return_debug=False,
         )
 
         # 合法动作特征 + 合法动作掩码

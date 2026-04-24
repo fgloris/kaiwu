@@ -17,7 +17,7 @@ class Config:
         4,   # hero
         7,   # monster1
         7,   # monster2
-        8,   # ray collision
+        24,  # raw ray collision scores
         8,  # nearest 2 treasures
         8,  # 2 buffs
         16,  # legal action mask
@@ -39,12 +39,12 @@ class Config:
 
     GAMMA = 0.99
     LAMDA = 0.95
-    INIT_LEARNING_RATE_START = 0.00007
-    LR_SCHEDULE_ENABLE = True
+    INIT_LEARNING_RATE_START = 0.0001
+    LR_SCHEDULE_ENABLE = False
     LR_WARMUP_EPISODES = 800
     LR_COSINE_EPISODES = 3000
     MIN_LEARNING_RATE = 0.00002
     BETA_START = 0.001
-    CLIP_PARAM = 0.20
-    VF_COEF = 1.0
+    CLIP_PARAM = 0.15
+    VF_COEF = 0.5
     GRAD_CLIP_RANGE = 1.0
