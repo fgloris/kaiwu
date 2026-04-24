@@ -391,6 +391,44 @@ class Preprocessor:
         near_threshold = 8.0 if is_speedup else 4.0
         return nearest_dist is not None and nearest_dist <= near_threshold
 
+    def _compute_danger_score(self, monster_feats, active_monster_count, env_info):
+        if active_monster_count <= 0:
+            return 0.0
+
+        monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
+        is_speedup = monster_speedup_step > 0 and self.step_no >= monster_speedup_step
+
+        near_threshold = 8.0 if is_speedup else 4.0
+        far_threshold = 16.0 if is_speedup else 10.0
+
+        monster_threats = []
+        for monster_feat in monster_feats[:active_monster_count]:
+            rel_x = float(monster_feat[2]) * MAP_SIZE
+            rel_z = float(monster_feat[3]) * MAP_SIZE
+            dist = float(np.hypot(rel_x, rel_z))
+
+            if dist <= near_threshold:
+                closeness = 1.0
+            elif dist >= far_threshold:
+                closeness = 0.0
+            else:
+                closeness = 1.0 - (dist - near_threshold) / max(far_threshold - near_threshold, 1e-6)
+
+            monster_threats.append(float(np.clip(closeness, 0.0, 1.0)))
+
+        if not monster_threats:
+            return 0.0
+
+        monster_threats.sort(reverse=True)
+        nearest_threat = monster_threats[0]
+        second_threat = monster_threats[1] if len(monster_threats) > 1 else 0.0
+
+        danger_score = nearest_threat + 0.25 * second_threat
+        if is_speedup:
+            danger_score *= 1.15
+
+        return float(np.clip(danger_score, 0.0, 1.0))
+
     def _parse_legal_action_raw(self, legal_act_raw):
         """Parse env legal_action into a 16D binary mask."""
         legal_action = [1] * 16
@@ -1210,13 +1248,12 @@ class Preprocessor:
         # 再提取边缘连通簇的 8 方向余弦投影特征
         monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
         is_monster_speedup = bool(monster_speedup_step > 0 and self.step_no >= monster_speedup_step)
-        is_dangerous = 0.0
-        if float(monster_feats[0][0]) > 0.5:
-            is_dangerous += 0.15
-        if float(monster_feats[1][0]) > 0.5:
-            is_dangerous += 0.35
-        if is_monster_speedup:
-            is_dangerous *= 2
+        active_monster_count = min(2, max(0, len(monsters)))
+        is_dangerous = self._compute_danger_score(
+            monster_feats,
+            active_monster_count,
+            env_info,
+        )
 
         in_view_monster_count = _norm(monster_feats[0][0] + monster_feats[1][0], 2.0)
         
