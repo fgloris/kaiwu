@@ -228,7 +228,6 @@ class Preprocessor:
         self.last_flash_count = 0
         self.last_is_dangerous = False
         self.last_hero_pos = None
-        self.last_connected_opening_count = 0
         self.last_monster_to_agent_vec = None
 
         self.pos_history = deque(maxlen=8)
@@ -688,93 +687,6 @@ class Preprocessor:
                 local_passable[i, j] = 1 if int(map_info[i][j]) != 0 else 0
         return local_passable
 
-    def _mask_monster_danger_zone_local(self, local_passable, monsters, hero_pos, radius=3):
-        """
-        在局部 21x21 邻域内，如果怪物在视野内，
-        则将其周围 7x7 区域置 0，再用于 boundary cluster 计算。
-        """
-        masked = np.array(local_passable, copy=True)
-        hero_x = int(hero_pos["x"])
-        hero_z = int(hero_pos["z"])
-
-        for monster in monsters[:2]:
-            if int(monster.get("is_in_view", 0)) <= 0:
-                continue
-            pos = monster.get("pos", {}) or {}
-            mx = int(pos.get("x", hero_x))
-            mz = int(pos.get("z", hero_z))
-
-            lx = mx - hero_x + LOCAL_MAP_HALF
-            ly = mz - hero_z + LOCAL_MAP_HALF
-            if not (0 <= lx < LOCAL_MAP_SIZE and 0 <= ly < LOCAL_MAP_SIZE):
-                continue
-
-            x0 = max(0, lx - radius)
-            x1 = min(LOCAL_MAP_SIZE, lx + radius + 1)
-            y0 = max(0, ly - radius)
-            y1 = min(LOCAL_MAP_SIZE, ly + radius + 1)
-            masked[y0:y1, x0:x1] = 0
-
-        return masked
-
-    def _get_boundary_passable_points(self, local_passable):
-        """
-        提取 21x21 局部图边框上的所有可通行点。
-        坐标采用 (x, y) = (列, 行)。
-        """
-        pts = []
-        h, w = local_passable.shape
-
-        for x in range(w):
-            if local_passable[0, x] > 0:
-                pts.append((x, 0))
-            if h > 1 and local_passable[h - 1, x] > 0:
-                pts.append((x, h - 1))
-
-        for y in range(1, h - 1):
-            if local_passable[y, 0] > 0:
-                pts.append((0, y))
-            if w > 1 and local_passable[y, w - 1] > 0:
-                pts.append((w - 1, y))
-
-        return pts
-
-    def _cluster_boundary_points(self, boundary_pts):
-        """
-        对边框可通行点按 8 邻接进行聚类。
-        boundary_pts 中坐标采用 (x, y)。
-        """
-        if not boundary_pts:
-            return []
-
-        pts_set = set(boundary_pts)
-        visited = set()
-        clusters = []
-
-        for seed in boundary_pts:
-            if seed in visited:
-                continue
-
-            queue = deque([seed])
-            visited.add(seed)
-            cluster = []
-
-            while queue:
-                x, y = queue.popleft()
-                cluster.append((x, y))
-                for dx in (-1, 0, 1):
-                    for dy in (-1, 0, 1):
-                        if dx == 0 and dy == 0:
-                            continue
-                        nxt = (x + dx, y + dy)
-                        if nxt in pts_set and nxt not in visited:
-                            visited.add(nxt)
-                            queue.append(nxt)
-
-            clusters.append(cluster)
-
-        return clusters
-
     def _compute_local_connected_mask(self, local_passable, start_x=LOCAL_MAP_HALF, start_y=LOCAL_MAP_HALF):
         """
         在 21x21 局部图中，从 agent 中心位置出发做 8 邻接 BFS，
@@ -810,79 +722,7 @@ class Preprocessor:
                     queue.append((nx, ny))
 
         return connected
-
-    def _compute_boundary_cluster_direction_scores(self, local_passable):
-        """
-        基于 21x21 局部图：
-        1. 提取边框可通行点
-        2. 对边框点做 8 邻接聚类
-        3. 仅保留与 agent 中心连通的簇
-        4. 将连通簇中心对 8 个动作方向做余弦相似度投影，得到 8 维方向分数
-        5. 若连通的边界开口簇数量 <= 1，则记为危险局势
-        """
-        boundary_pts = self._get_boundary_passable_points(local_passable)
-        clusters = self._cluster_boundary_points(boundary_pts)
-        connected_mask = self._compute_local_connected_mask(local_passable)
-
-        agent_x = float(LOCAL_MAP_HALF)
-        agent_y = float(LOCAL_MAP_HALF)
-        dir_scores = np.zeros(len(DIR8), dtype=np.float32)
-
-        connected_clusters = []
-        total_connected_weight = 0.0
-
-        for cluster in clusters:
-            is_connected = any(connected_mask[y, x] > 0 for x, y in cluster)
-            if not is_connected:
-                continue
-
-            xs = np.asarray([p[0] for p in cluster], dtype=np.float32)
-            ys = np.asarray([p[1] for p in cluster], dtype=np.float32)
-            cx = float(xs.mean())
-            cy = float(ys.mean())
-
-            vx = cx - agent_x
-            vy = cy - agent_y
-            dist = float(np.hypot(vx, vy))
-            if dist <= 1e-6:
-                continue
-
-            uvx = vx / dist
-            uvy = vy / dist
-            size_weight = float(np.clip(len(cluster) / 3.0, 0.0, 1.0))
-            if size_weight <= 1e-6:
-                continue
-
-            total_connected_weight += size_weight
-            connected_clusters.append({
-                "center": (cx, cy),
-                "size": len(cluster),
-                "dist": dist,
-            })
-
-            for i, (dx, dz) in enumerate(DIR8):
-                dir_vec = np.asarray([float(dx), float(dz)], dtype=np.float32)
-                dir_norm = float(np.linalg.norm(dir_vec))
-                if dir_norm <= 1e-6:
-                    continue
-                align = float((uvx * dir_vec[0] + uvy * dir_vec[1]) / dir_norm)
-                if align > 0.0:
-                    dir_scores[i] += align * size_weight
-
-        if total_connected_weight > 1e-6:
-            dir_scores /= total_connected_weight
-
-        dir_scores = np.clip(dir_scores, 0.0, 1.0).astype(np.float32)
-        is_dangerous = len(connected_clusters) <= 1
-        return dir_scores, {
-            "boundary_pts": boundary_pts,
-            "clusters": clusters,
-            "connected_clusters": connected_clusters,
-            "connected_opening_count": len(connected_clusters),
-            "is_dangerous": is_dangerous,
-            "masked_local_passable": np.array(local_passable, copy=True),
-        }
-
+    
     def _action_to_dir_vec(self, action_idx):
         """
         将动作索引映射成 8 方向单位向量。
@@ -1368,35 +1208,19 @@ class Preprocessor:
 
         # 基于当前 21x21 绝对已知区域，先将视野内怪物周围 7x7 置 0，
         # 再提取边缘连通簇的 8 方向余弦投影特征
-        local_passable_21 = self._extract_local_passable_patch(map_info)
-        local_passable_21_masked = self._mask_monster_danger_zone_local(
-            local_passable_21,
-            monsters,
-            hero_pos,
-            radius=3,
-        )
-        boundary_cluster_feat, boundary_cluster_info = self._compute_boundary_cluster_direction_scores(
-            local_passable_21_masked
-        )
-        connected_opening_count_raw = int(boundary_cluster_info["connected_opening_count"])
-        connected_opening_count = _norm(connected_opening_count_raw, 5)
-        active_monster_count = min(2, max(0, len(monsters)))
-        two_monsters_in_view = bool(
-            active_monster_count >= 2
-            and float(monster_feats[0][0]) > 0.5
-            and float(monster_feats[1][0]) > 0.5
-        )
         monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
         is_monster_speedup = bool(monster_speedup_step > 0 and self.step_no >= monster_speedup_step)
         is_dangerous = 0.0
-        if two_monsters_in_view:
-            is_dangerous += 0.33
+        if float(monster_feats[0][0]) > 0.5:
+            is_dangerous += 0.15
+        if float(monster_feats[1][0]) > 0.5:
+            is_dangerous += 0.35
         if is_monster_speedup:
-            is_dangerous += 0.33
-        if connected_opening_count_raw <= 1:
-            is_dangerous += 0.33
+            is_dangerous *= 2
+
+        in_view_monster_count = _norm(monster_feats[0][0] + monster_feats[1][0], 2.0)
         
-        situation_feat = np.array([connected_opening_count, is_dangerous], dtype=np.float32)
+        situation_feat = np.array([in_view_monster_count, is_dangerous], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         # 新增一组 8 维边缘连通簇方向特征，放在 ray collision 特征之后
@@ -1406,7 +1230,6 @@ class Preprocessor:
                 monster_feats[0],
                 monster_feats[1],
                 ray_collision_feat,
-                boundary_cluster_feat,
                 treasure_feat,
                 buff_feat,
                 legal_action_feat,
@@ -1422,10 +1245,7 @@ class Preprocessor:
             "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
             "last_action": int(last_action),
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
-            "connected_boundary_clusters": boundary_cluster_info["connected_clusters"],
-            "connected_opening_count": connected_opening_count_raw,
             "is_dangerous": is_dangerous,
-            "two_monsters_in_view": two_monsters_in_view,
             "is_monster_speedup": is_monster_speedup,
             "cut_treasure_by_monster_angle": bool(cut_treasure_by_monster_angle),
             "nearest_treasure_dist_norm": float(nearest_treasure_dist_norm),
@@ -1514,7 +1334,6 @@ class Preprocessor:
         
         # 局势相关 reward settings
         cur_is_dangerous = bool(reward_feats.get("is_dangerous", 0.0))
-        cur_opening_count = int(reward_feats.get("connected_opening_count", 0))
         danger_penalty = -1.0 * cur_is_dangerous
 
 
@@ -1537,7 +1356,6 @@ class Preprocessor:
         used_flash = (flash_count - self.last_flash_count) > 0
         cur_monster_to_agent_vec = self._monster_to_agent_vector(m1)
         if used_flash:
-            was_dangerous = bool(self.last_is_dangerous > 0.5)
             crossed_wall = self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
             if not second_exists:
                 crossed_monster = self._did_cross_monster_by_angle(
@@ -1554,8 +1372,8 @@ class Preprocessor:
                 ))
 
             flash_reward = 0.0
-            if was_dangerous and (crossed_wall or crossed_monster):
-                flash_reward = 32.0
+            if self.last_is_dangerous > 0.3 and (crossed_wall or crossed_monster):
+                flash_reward = 32.0 * self.last_is_dangerous
             else:
                 if flash_move_dist is None:
                     flash_reward = 0.0
@@ -1565,7 +1383,6 @@ class Preprocessor:
         self.last_flash_count = flash_count
         self.last_is_dangerous = cur_is_dangerous
         self.last_hero_pos = cur_hero_pos
-        self.last_connected_opening_count = cur_opening_count
         self.last_monster_to_agent_vec = cur_monster_to_agent_vec
 
         # buff 奖励
