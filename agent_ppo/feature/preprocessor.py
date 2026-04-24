@@ -1335,8 +1335,8 @@ class Preprocessor:
                 continue
             if self.visibility_map[ox, oz] == 0:
                 continue
-            #if not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
-            #    continue
+            if not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
+                continue
 
             center_i = ox - gx0
             center_j = oz - gy0
@@ -1395,9 +1395,15 @@ class Preprocessor:
         )
         monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
         is_monster_speedup = bool(monster_speedup_step > 0 and self.step_no >= monster_speedup_step)
-        is_dangerous = bool(two_monsters_in_view or is_monster_speedup or connected_opening_count_raw <= 1)
+        is_dangerous = 0.0
+        if two_monsters_in_view:
+            is_dangerous += 0.33
+        if is_monster_speedup:
+            is_dangerous += 0.33
+        if connected_opening_count_raw <= 1:
+            is_dangerous += 0.33
         
-        situation_feat = np.array([connected_opening_count, float(is_dangerous)], dtype=np.float32)
+        situation_feat = np.array([connected_opening_count, is_dangerous], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         # 新增一组 8 维边缘连通簇方向特征，放在 ray collision 特征之后
@@ -1514,9 +1520,9 @@ class Preprocessor:
             self.last_monster_invisible_2 = False
         
         # 局势相关 reward settings
-        cur_is_dangerous = bool(reward_feats.get("is_dangerous", False))
+        cur_is_dangerous = bool(reward_feats.get("is_dangerous", 0.0))
         cur_opening_count = int(reward_feats.get("connected_opening_count", 0))
-        danger_penalty = -1.0 if cur_is_dangerous else 0.0
+        danger_penalty = -1.0 * cur_is_dangerous
 
 
         # 靠墙惩罚：只在 hero 周围 5x5 小窗口内查最近已知墙，减少计算量
@@ -1536,7 +1542,7 @@ class Preprocessor:
 
         flash_count = int(env_info.get("flash_count", self.last_flash_count))
         used_flash = (flash_count - self.last_flash_count) > 0
-        was_dangerous = bool(self.last_is_dangerous)
+        was_dangerous = bool(self.last_is_dangerous > 0.5)
         crossed_wall = used_flash and self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
         cur_monster_to_agent_vecs = [
             self._monster_to_agent_vector(m1),
@@ -1544,7 +1550,7 @@ class Preprocessor:
         ]
         crossed_monster = used_flash and self._did_cross_monster_by_angle(
             cur_monster_to_agent_vecs,
-            angle_threshold=150.0,
+            angle_threshold=100.0,
         )
         flash_move_dist = None
         if used_flash and self.last_hero_pos is not None and cur_hero_pos is not None:
@@ -1556,7 +1562,7 @@ class Preprocessor:
         flash_reward = 0.0
         if used_flash:
             if was_dangerous and (crossed_wall or crossed_monster):
-                flash_reward = 8.0
+                flash_reward = 32.0
             else:
                 if flash_move_dist is None:
                     flash_reward = -1.0
@@ -1599,7 +1605,7 @@ class Preprocessor:
         # treasure score gain is ignored while a monster is too close or blocks the path to the treasure.
         if is_monster_near or bool(reward_feats.get("cut_treasure_by_monster_angle", False)):
             treasure_score_gain = 0.0
-            treasure_dist_reward = -0.2
+            treasure_dist_reward = -0.1
 
         # final step reward vector
         dist_shaping_norm_weight = 12.8
@@ -1610,7 +1616,7 @@ class Preprocessor:
         reward_vector = [
             reward_config.treasure_score_gain * treasure_score_gain,
             reward_config.survival * reward_config.survival_multiplier * survive_reward,
-            reward_config.los_break * los_break_reward,
+            0.0, #reward_config.los_break * los_break_reward,
             reward_config.flash * flash_reward,
             reward_config.wall_penalty * near_wall_penalty,
             reward_config.abb_penalty * abb_penalty,
