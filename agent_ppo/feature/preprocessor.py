@@ -229,7 +229,7 @@ class Preprocessor:
         self.last_is_dangerous = False
         self.last_hero_pos = None
         self.last_connected_opening_count = 0
-        self.last_monster_to_agent_vecs = [None, None]
+        self.last_monster_to_agent_vec = None
 
         self.pos_history = deque(maxlen=8)
         self.abb_safe_score = 4.0
@@ -339,8 +339,6 @@ class Preprocessor:
             return True  # 出界直接视为墙，更保守
         return bool(self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0)
 
-        return bool(self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0)
-
     def _did_segment_cross_known_wall(self, start_pos, end_pos):
         if start_pos is None or end_pos is None:
             return False
@@ -372,17 +370,12 @@ class Preprocessor:
             return None
         return vec / norm
 
-    def _did_cross_monster_by_angle(self, cur_monster_vecs, angle_threshold=150.0):
-        crossed_any = False
-        for last_vec, cur_vec in zip(self.last_monster_to_agent_vecs, cur_monster_vecs):
-            if last_vec is None or cur_vec is None:
-                continue
-            cos_angle = float(np.clip(np.dot(last_vec, cur_vec), -1.0, 1.0))
-            angle = float(np.degrees(np.arccos(cos_angle)))
-            if not angle > angle_threshold:
-                return False
-            crossed_any = True
-        return crossed_any
+    def _did_cross_monster_by_angle(self, cur_monster_vec, angle_threshold=120.0):
+        if self.last_monster_to_agent_vec is None or cur_monster_vec is None:
+            return False
+        cos_angle = float(np.clip(np.dot(self.last_monster_to_agent_vec, cur_monster_vec), -1.0, 1.0))
+        angle = float(np.degrees(np.arccos(cos_angle)))
+        return angle > angle_threshold
 
     def _nearest_monster_grid_distance(self, monster_feats, active_monster_count):
         dists = []
@@ -1542,38 +1535,38 @@ class Preprocessor:
 
         flash_count = int(env_info.get("flash_count", self.last_flash_count))
         used_flash = (flash_count - self.last_flash_count) > 0
-        was_dangerous = bool(self.last_is_dangerous > 0.5)
-        crossed_wall = used_flash and self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
-        cur_monster_to_agent_vecs = [
-            self._monster_to_agent_vector(m1),
-            self._monster_to_agent_vector(m2) if second_exists else None,
-        ]
-        crossed_monster = used_flash and self._did_cross_monster_by_angle(
-            cur_monster_to_agent_vecs,
-            angle_threshold=100.0,
-        )
-        flash_move_dist = None
-        if used_flash and self.last_hero_pos is not None and cur_hero_pos is not None:
-            flash_move_dist = float(np.hypot(
-                float(cur_hero_pos[0]) - float(self.last_hero_pos[0]),
-                float(cur_hero_pos[1]) - float(self.last_hero_pos[1]),
-            ))
-
-        flash_reward = 0.0
+        cur_monster_to_agent_vec = self._monster_to_agent_vector(m1)
         if used_flash:
+            was_dangerous = bool(self.last_is_dangerous > 0.5)
+            crossed_wall = self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
+            if not second_exists:
+                crossed_monster = self._did_cross_monster_by_angle(
+                    cur_monster_to_agent_vec,
+                    angle_threshold=100.0,
+                )
+            else: crossed_monster = False
+
+            flash_move_dist = None
+            if self.last_hero_pos is not None and cur_hero_pos is not None:
+                flash_move_dist = float(np.hypot(
+                    float(cur_hero_pos[0]) - float(self.last_hero_pos[0]),
+                    float(cur_hero_pos[1]) - float(self.last_hero_pos[1]),
+                ))
+
+            flash_reward = 0.0
             if was_dangerous and (crossed_wall or crossed_monster):
                 flash_reward = 32.0
             else:
                 if flash_move_dist is None:
-                    flash_reward = -1.0
+                    flash_reward = 0.0
                 else:
-                    flash_reward = -1.0 - 3.0 * (1.0 - _norm(flash_move_dist, 10.0))
+                    flash_reward = -0.1 - 0.3 * (1.0 - _norm(flash_move_dist, 10.0))
 
         self.last_flash_count = flash_count
         self.last_is_dangerous = cur_is_dangerous
         self.last_hero_pos = cur_hero_pos
         self.last_connected_opening_count = cur_opening_count
-        self.last_monster_to_agent_vecs = cur_monster_to_agent_vecs
+        self.last_monster_to_agent_vec = cur_monster_to_agent_vec
 
         # buff 奖励
         monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
