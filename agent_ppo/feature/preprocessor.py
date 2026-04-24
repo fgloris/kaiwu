@@ -26,8 +26,8 @@ VIEW_MAP_SIZE = 21
 # Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 2.0
 # Monster distance bucket / 怪物距离桶
-MONSTER_DIST_BUCKET_MAX = 7.0
 MONSTER_DIST_BUCKET_EDGES = (0.0, 4.0, 10.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0)
+MONSTER_DIST_BUCKET_MIDPOINTS = (2.0, 7.0, 20.0, 45.0, 75.0, 105.0, 135.0, 165.0)
 OLD_MONSTER_DIST_BUCKET_MAX = 5
 # Max flash cooldown / 最大闪现冷却步数
 MAX_FLASH_CD = 200.0
@@ -82,29 +82,6 @@ def _clip_window(x0, x1, y0, y1, size=MAP_SIZE_INT):
     y1 = min(size, y1)
     return x0, x1, y0, y1
 
-def _bucketize_left(x, num_bins, x_min=0.0, x_max=1.0):
-    """
-    将连续值桶化，并映射到所在桶的左端点。
-    例如:
-        x in [0.0, 0.2) -> 0.0
-        x in [0.2, 0.4) -> 0.2
-
-    参数:
-        x: float 或 numpy array
-        num_bins: 桶数，例如 5
-        x_min, x_max: 取值范围
-    """
-
-    x = np.asarray(x, dtype=np.float32)
-    x = np.clip(x, x_min, x_max)
-
-    step = (x_max - x_min) / float(num_bins)
-    # 处理 x == x_max 的边界
-    idx = np.floor((x - x_min) / step).astype(np.int32)
-    idx = np.clip(idx, 0, num_bins - 1)
-
-    return x_min + idx * step
-
 def _distance_bucket_to_radius(dist_bucket):
     """
     将 hero_l2_distance 桶编号(0~5)估算成一个代表距离。
@@ -123,25 +100,26 @@ def _distance_bucket_to_radius(dist_bucket):
     }
     return bucket_mid[dist_bucket]
 
-def _monster_dist_bucket_norm_from_raw(dist):
+def _monster_dist_bucket_index_from_raw(dist):
     dist = float(np.clip(dist, MONSTER_DIST_BUCKET_EDGES[0], MONSTER_DIST_BUCKET_EDGES[-1]))
-    bucket_idx = len(MONSTER_DIST_BUCKET_EDGES) - 2
-    for i in range(len(MONSTER_DIST_BUCKET_EDGES) - 1):
-        left = MONSTER_DIST_BUCKET_EDGES[i]
-        right = MONSTER_DIST_BUCKET_EDGES[i + 1]
-        if i == len(MONSTER_DIST_BUCKET_EDGES) - 2:
-            if left <= dist <= right:
-                bucket_idx = i
-                break
-        elif left <= dist < right:
-            bucket_idx = i
-            break
-    return float(bucket_idx) / MONSTER_DIST_BUCKET_MAX
+    last_bucket_idx = len(MONSTER_DIST_BUCKET_EDGES) - 2
+    for bucket_idx in range(last_bucket_idx):
+        left = MONSTER_DIST_BUCKET_EDGES[bucket_idx]
+        right = MONSTER_DIST_BUCKET_EDGES[bucket_idx + 1]
+        if left <= dist < right:
+            return bucket_idx
+    return last_bucket_idx
+
+def _monster_dist_bucket_norm_from_index(bucket_idx):
+    bucket_idx = int(np.clip(bucket_idx, 0, len(MONSTER_DIST_BUCKET_MIDPOINTS) - 1))
+    return _norm(MONSTER_DIST_BUCKET_MIDPOINTS[bucket_idx], MONSTER_DIST_BUCKET_EDGES[-1])
+
+def _monster_dist_bucket_norm_from_raw(dist):
+    return _monster_dist_bucket_norm_from_index(_monster_dist_bucket_index_from_raw(dist))
 
 def _monster_dist_bucket_norm_from_env_bucket(old_bucket):
     old_bucket = int(np.clip(old_bucket, 0, OLD_MONSTER_DIST_BUCKET_MAX))
-    new_bucket = old_bucket + 2
-    return float(new_bucket) / MONSTER_DIST_BUCKET_MAX
+    return _monster_dist_bucket_norm_from_index(old_bucket + 2)
 
 def _estimate_monster_pos(hero_x, hero_z, monster):
     """
@@ -399,7 +377,7 @@ class Preprocessor:
         is_speedup = monster_speedup_step > 0 and self.step_no >= monster_speedup_step
 
         near_threshold = 8.0 if is_speedup else 4.0
-        far_threshold = 16.0 if is_speedup else 10.0
+        far_threshold = 16.0 if is_speedup else 8.0
 
         monster_threats = []
         for monster_feat in monster_feats[:active_monster_count]:
