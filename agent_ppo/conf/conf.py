@@ -17,7 +17,7 @@ class Config:
         4,   # hero
         7,   # monster1
         7,   # monster2
-        24,  # raw ray collision scores
+        8,  # ray collision scores
         8,  # nearest 2 treasures
         8,  # 2 buffs
         16,  # legal action mask
@@ -46,5 +46,5 @@ class Config:
     MIN_LEARNING_RATE = 0.00002
     BETA_START = 0.001
     CLIP_PARAM = 0.15
-    VF_COEF = 0.5
+    VF_COEF = 0.7
     GRAD_CLIP_RANGE = 1.0
