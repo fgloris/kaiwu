@@ -1586,7 +1586,7 @@ class Preprocessor:
         buff_pick_reward = buff_delta * (40.0 if monster_goingto_speedup else 20.0)
 
         # 生存奖励
-        survive_reward = 1.00 + (self.step_no / 200)
+        survive_reward = 1.00 #+ (self.step_no / 200)
         if abb_score < self.abb_safe_score:
             survive_reward = 0.0
             los_break_reward = min(los_break_reward, 0.0)
