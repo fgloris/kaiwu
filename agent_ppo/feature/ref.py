@@ -3,7 +3,7 @@
 ###########################################################################
 # Copyright © 1998 - 2026 Tencent. All Rights Reserved.
 ###########################################################################
-# 旧版本
+# 新版本
 """
 Author: Tencent AI Arena Authors
 
@@ -12,9 +12,9 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 """
 
 import json
+import heapq
 import numpy as np
 from collections import deque
-from agent_ppo.feature.curriculum import REWARD_CONFIG
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
@@ -23,12 +23,8 @@ LOCAL_MAP_SIZE = 21
 LOCAL_MAP_HALF = 10
 VIEW_MAP_SIZE = 21
 
-# Max monster speed / 最大怪物速度
-MAX_MONSTER_SPEED = 2.0
-# Monster distance bucket / 怪物距离桶
-MONSTER_DIST_BUCKET_MAX = 7.0
-MONSTER_DIST_BUCKET_EDGES = (0.0, 4.0, 10.0, 30.0, 60.0, 90.0, 120.0, 150.0, 180.0)
-OLD_MONSTER_DIST_BUCKET_MAX = 5
+# Max distance bucket / 距离桶最大值
+MAX_DIST_BUCKET = 5.0
 # Max flash cooldown / 最大闪现冷却步数
 MAX_FLASH_CD = 200.0
 # Max buff duration / buff最大持续时间
@@ -63,9 +59,15 @@ DIR8 = [
 # 24 个扫描角：0, 15, 30, ..., 345
 SCAN_ANGLES_DEG = list(range(0, 360, 15))
 
+# 视野外怪物预测：每 N 帧重算一次 A* 路径
+MONSTER_ASTAR_REPLAN_INTERVAL = 1
 
-def _get_reward_config():
-    return REWARD_CONFIG
+# Curriculum / 课程训练切换
+CURRICULUM_STAGE2_EPISODE = 2000
+SCORE_GAIN_WEIGHT_STAGE1 = 0.50
+SCORE_GAIN_WEIGHT_STAGE2 = 0.70
+SURVIVAL_WEIGHT_STAGE1 = 0.03
+SURVIVAL_WEIGHT_STAGE2 = 0.08
 
 def _norm(v, v_max, v_min=0.0):
     """Normalize value to [0, 1].
@@ -123,26 +125,6 @@ def _distance_bucket_to_radius(dist_bucket):
     }
     return bucket_mid[dist_bucket]
 
-def _monster_dist_bucket_norm_from_raw(dist):
-    dist = float(np.clip(dist, MONSTER_DIST_BUCKET_EDGES[0], MONSTER_DIST_BUCKET_EDGES[-1]))
-    bucket_idx = len(MONSTER_DIST_BUCKET_EDGES) - 2
-    for i in range(len(MONSTER_DIST_BUCKET_EDGES) - 1):
-        left = MONSTER_DIST_BUCKET_EDGES[i]
-        right = MONSTER_DIST_BUCKET_EDGES[i + 1]
-        if i == len(MONSTER_DIST_BUCKET_EDGES) - 2:
-            if left <= dist <= right:
-                bucket_idx = i
-                break
-        elif left <= dist < right:
-            bucket_idx = i
-            break
-    return float(bucket_idx) / MONSTER_DIST_BUCKET_MAX
-
-def _monster_dist_bucket_norm_from_env_bucket(old_bucket):
-    old_bucket = int(np.clip(old_bucket, 0, OLD_MONSTER_DIST_BUCKET_MAX))
-    new_bucket = old_bucket + 2
-    return float(new_bucket) / MONSTER_DIST_BUCKET_MAX
-
 def _estimate_monster_pos(hero_x, hero_z, monster):
     """
     返回怪物估计位置 (mx, mz)，整数网格坐标。
@@ -175,6 +157,28 @@ def _paint_square(mask, center_i, center_j, radius=1, value=1.0):
             jj = center_j + dj
             if 0 <= ii < h and 0 <= jj < w:
                 mask[ii, jj] = value
+
+def _paint_path(layer, path, gx0, gy0, path_value=0.35, radius=0):
+    """
+    将全局路径 path=[(x,z), ...] 画到局部 layer 上。
+    - 中间路径点使用较低强度
+    - 路径起点/终点可使用更高强度
+    """
+    if path is None or len(path) == 0:
+        return
+
+    h, w = layer.shape
+    for idx, (px, pz) in enumerate(path):
+        li = int(px - gx0)
+        lj = int(pz - gy0)
+        if not (0 <= li < h and 0 <= lj < w):
+            continue
+
+        value = path_value * (1.2 - _norm(idx, MAP_SIZE))
+        if radius <= 0:
+            layer[li, lj] = value
+        else:
+            _paint_square(layer, li, lj, radius=radius, value=value)
 
 def _paint_recent_positions_on_passable(layer, positions, gx0, gy0):
     """
@@ -224,12 +228,9 @@ class Preprocessor:
         self.last_monster_invisible_1 = False
         self.last_monster_invisible_2 = False
 
-        self.last_treasure_score = 0.0
+        self.last_total_score = 0.0
         self.last_flash_count = 0
-        self.last_is_dangerous = 0
-        self.last_hero_pos = None
-        self.last_connected_opening_count = 0
-        self.last_monster_to_agent_vecs = [None, None]
+        self.last_is_dangerous = False
 
         self.pos_history = deque(maxlen=8)
         self.abb_safe_score = 4.0
@@ -243,14 +244,24 @@ class Preprocessor:
         self.last_collected_buff = 0
         self.buff_refresh_time = 200
 
-        # 视野外怪物速度先验
-        self.last_seen_monster_speed = [1, 1]
-
         # ========= 两层全局记忆 =========
         # 第一层：可通行地图：1=可走, 0=不能走/未知
         self.passable_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
         # 第二层：可见性地图：1=已知, 0=未知
         self.visibility_map = np.zeros((MAP_SIZE_INT, MAP_SIZE_INT), dtype=np.uint8)
+        self.monster_predicted_paths = [[], []]
+        self.monster_replan_counters = [0, 0]
+
+        # 怪物视野外预测位置缓存
+        self.last_seen_monster_pos = [None, None]
+        self.last_seen_monster_speed = [1, 1]
+        self.predicted_monster_pos = [None, None]
+        self.monster_prediction_error_sum = 0.0
+        self.monster_prediction_error_count = 0
+        self.monster_prediction_error_avg = 0.0
+        self.monster_offview_predict_count = 0
+        self.monster_fallback_count = 0
+        self.monster_fallback_rate = 0.0
 
     def update_global_maps(self, hero_x, hero_y, map_info):
         """
@@ -338,66 +349,6 @@ class Preprocessor:
         if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
             return True  # 出界直接视为墙，更保守
         return bool(self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0)
-
-        return bool(self.visibility_map[x, z] > 0 and self.passable_map[x, z] == 0)
-
-    def _did_segment_cross_known_wall(self, start_pos, end_pos):
-        if start_pos is None or end_pos is None:
-            return False
-
-        x0, z0 = int(start_pos[0]), int(start_pos[1])
-        x1, z1 = int(end_pos[0]), int(end_pos[1])
-        dx = x1 - x0
-        dz = z1 - z0
-        steps = int(max(abs(dx), abs(dz)) * 2)
-        if steps <= 1:
-            return False
-
-        for i in range(1, steps):
-            t = i / float(steps)
-            x = int(round(x0 + dx * t))
-            z = int(round(z0 + dz * t))
-            if (x, z) == (x0, z0) or (x, z) == (x1, z1):
-                continue
-            if self._is_known_wall(x, z):
-                return True
-        return False
-
-    def _monster_to_agent_vector(self, monster_feat):
-        rel_x = float(monster_feat[2])
-        rel_z = float(monster_feat[3])
-        vec = np.asarray([-rel_x, -rel_z], dtype=np.float32)
-        norm = float(np.linalg.norm(vec))
-        if norm <= 1e-6:
-            return None
-        return vec / norm
-
-    def _did_cross_monster_by_angle(self, cur_monster_vecs, angle_threshold=150.0):
-        crossed_any = False
-        for last_vec, cur_vec in zip(self.last_monster_to_agent_vecs, cur_monster_vecs):
-            if last_vec is None or cur_vec is None:
-                continue
-            cos_angle = float(np.clip(np.dot(last_vec, cur_vec), -1.0, 1.0))
-            angle = float(np.degrees(np.arccos(cos_angle)))
-            if not angle > angle_threshold:
-                return False
-            crossed_any = True
-        return crossed_any
-
-    def _nearest_monster_grid_distance(self, monster_feats, active_monster_count):
-        dists = []
-        for monster_feat in monster_feats[:active_monster_count]:
-            rel_x = float(monster_feat[2]) * MAP_SIZE
-            rel_z = float(monster_feat[3]) * MAP_SIZE
-            dists.append(float(np.hypot(rel_x, rel_z)))
-        return min(dists) if dists else None
-
-    def _is_monster_near(self, monster_feats, active_monster_count, env_info):
-        nearest_dist = self._nearest_monster_grid_distance(monster_feats, active_monster_count)
-        monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
-        is_speedup = monster_speedup_step > 0 and self.step_no >= monster_speedup_step
-        near_threshold = 8.0 if is_speedup else 4.0
-        return nearest_dist is not None and nearest_dist <= near_threshold
 
     def _parse_legal_action_raw(self, legal_act_raw):
         """Parse env legal_action into a 16D binary mask."""
@@ -913,6 +864,130 @@ class Preprocessor:
             return None
         return float(dx / norm), float(dz / norm)
 
+    def _astar_next_step_towards(self, start, goal):
+        """
+        在已知可通行区域上，用 A* 从 start 朝 goal 导航。
+        未知区域视作阻碍；若存在路径，返回从 start 出发的下一步位置。
+        """
+        if start is None or goal is None:
+            return None
+
+        sx, sz = int(start[0]), int(start[1])
+        gx, gz = int(goal[0]), int(goal[1])
+
+        if not (0 <= sx < MAP_SIZE_INT and 0 <= sz < MAP_SIZE_INT):
+            return None
+        if not (0 <= gx < MAP_SIZE_INT and 0 <= gz < MAP_SIZE_INT):
+            return None
+        if not self._is_global_passable(sx, sz):
+            return None
+        if not self._is_global_passable(gx, gz):
+            return None
+        if (sx, sz) == (gx, gz):
+            return (sx, sz)
+
+        def heuristic(x, z):
+            return max(abs(x - gx), abs(z - gz))
+
+        open_heap = []
+        heapq.heappush(open_heap, (heuristic(sx, sz), 0.0, (sx, sz)))
+        came_from = {}
+        g_score = {(sx, sz): 0.0}
+        closed = set()
+
+        while open_heap:
+            _, cur_g, cur = heapq.heappop(open_heap)
+            if cur in closed:
+                continue
+            closed.add(cur)
+
+            if cur == (gx, gz):
+                break
+
+            cx, cz = cur
+            for dx, dz in DIR8:
+                nx = cx + dx
+                nz = cz + dz
+                nxt = (nx, nz)
+                if nxt in closed:
+                    continue
+                if not self._is_global_passable(nx, nz):
+                    continue
+
+                step_cost = 1.41421356 if (dx != 0 and dz != 0) else 1.0
+                new_g = cur_g + step_cost
+                if new_g + 1e-6 < g_score.get(nxt, float('inf')):
+                    g_score[nxt] = new_g
+                    came_from[nxt] = cur
+                    heapq.heappush(open_heap, (new_g + heuristic(nx, nz), new_g, nxt))
+
+        if (gx, gz) not in came_from and (gx, gz) != (sx, sz):
+            return None
+
+        cur = (gx, gz)
+        while came_from.get(cur) != (sx, sz):
+            parent = came_from.get(cur)
+            if parent is None:
+                return None
+            cur = parent
+        return cur
+
+    def _update_predicted_monster_pos(self, idx, monster, hero_pos, env_info):
+        """
+        视野内：
+        - 直接使用真实位置
+        - 记录最近一次视野内观测到的速度
+        - 每帧基于真实位置到 hero 重新计算一次 A* 路径，并缓存到 monster layer
+        视野外：
+        - 从上一预测位置/最后可见位置出发
+        - 每 N 帧重算一次 A*，中间沿缓存路径每帧推进若干步
+        - 视野外优先使用最近一次视野内观测到的速度作为先验速度
+        - 若 A* 失败，则 fallback 到方向桶+距离桶粗估
+        """
+        is_in_view = int(monster.get("is_in_view", 0)) > 0
+        hero_xy = (int(hero_pos["x"]), int(hero_pos["z"]))
+
+        if is_in_view and ("pos" in monster) and (monster["pos"] is not None):
+            mx = int(monster["pos"]["x"])
+            mz = int(monster["pos"]["z"])
+            self.last_seen_monster_speed[idx] = max(1, int(monster.get("speed", 1)))
+            self.last_seen_monster_pos[idx] = (mx, mz)
+            self.predicted_monster_pos[idx] = (mx, mz)
+
+            path = self._astar_path((mx, mz), hero_xy)
+            self.monster_predicted_paths[idx] = path if path else [(mx, mz)]
+            self.monster_replan_counters[idx] = max(1, int(MONSTER_ASTAR_REPLAN_INTERVAL))
+            return mx, mz
+
+        start_pos = self.predicted_monster_pos[idx]
+        if start_pos is None:
+            start_pos = self.last_seen_monster_pos[idx]
+
+        step_count = max(1, int(self.last_seen_monster_speed[idx]))
+        self.monster_offview_predict_count += 1
+
+        predicted = self._maybe_replan_monster_path(
+            idx=idx,
+            start_pos=start_pos,
+            hero_pos=hero_xy,
+            step_count=step_count,
+        )
+
+        if predicted is not None:
+            self.predicted_monster_pos[idx] = predicted
+            self.monster_fallback_rate = self.monster_fallback_count / max(1, self.monster_offview_predict_count)
+            return int(predicted[0]), int(predicted[1])
+
+        self.monster_fallback_count += 1
+        self.logger.warning("monster prediction fallback!")
+        self.monster_fallback_rate = self.monster_fallback_count / max(1, self.monster_offview_predict_count)
+
+        est_mx, est_mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], monster)
+        self.predicted_monster_pos[idx] = (int(est_mx), int(est_mz))
+        self.monster_predicted_paths[idx] = [(int(est_mx), int(est_mz))]
+        self.monster_replan_counters[idx] = 0
+        return int(est_mx), int(est_mz)
+
     def _is_in_current_view(self, obj_pos, hero_pos):
         """
         判断某个全局坐标是否落在当前 hero 为中心的 21x21 视野内。
@@ -1053,51 +1128,6 @@ class Preprocessor:
 
         return np.concatenate(feat_list, axis=0), items, best_dist_norm
 
-    def _should_cut_treasure_by_monster_angle(self, hero_pos, treasure_items, monsters):
-        if not treasure_items:
-            return False
-
-        nearest_treasure = treasure_items[0]
-        if not nearest_treasure.get("available", False):
-            return False
-        treasure_pos = nearest_treasure["pos"]
-        if not self._is_in_current_view(treasure_pos, hero_pos):
-            return False
-
-        hero_x = float(hero_pos["x"])
-        hero_z = float(hero_pos["z"])
-        treasure_vec = np.asarray(
-            [float(treasure_pos[0]) - hero_x, float(treasure_pos[1]) - hero_z],
-            dtype=np.float32,
-        )
-        treasure_norm = float(np.linalg.norm(treasure_vec))
-        if treasure_norm <= 1e-6:
-            return False
-        treasure_vec = treasure_vec / treasure_norm
-
-        nearest_monster_vec = None
-        nearest_monster_dist = None
-        for monster in monsters[:2]:
-            if int(monster.get("is_in_view", 0)) <= 0:
-                continue
-            pos = monster.get("pos", {}) or {}
-            mx = float(pos.get("x", hero_x))
-            mz = float(pos.get("z", hero_z))
-            vec = np.asarray([mx - hero_x, mz - hero_z], dtype=np.float32)
-            dist = float(np.linalg.norm(vec))
-            if dist <= 1e-6:
-                continue
-            if nearest_monster_dist is None or dist < nearest_monster_dist:
-                nearest_monster_dist = dist
-                nearest_monster_vec = vec / dist
-
-        if nearest_monster_vec is None:
-            return False
-
-        cos_angle = float(np.clip(np.dot(nearest_monster_vec, treasure_vec), -1.0, 1.0))
-        angle = float(np.degrees(np.arccos(cos_angle)))
-        return angle < 30.0
-
     def _compute_positive_dist_shaping(self, cur_dist_norm, last_attr_name):
         if cur_dist_norm < 0:
             setattr(self, last_attr_name, -1.0)
@@ -1108,6 +1138,33 @@ class Preprocessor:
             reward = max(0.0, last_dist_norm - cur_dist_norm)
         setattr(self, last_attr_name, float(cur_dist_norm))
         return reward
+
+    def _build_history_position_feat(self, hero_pos):
+        cur_x = int(hero_pos["x"])
+        cur_z = int(hero_pos["z"])
+
+        history = list(self.pos_history)
+
+        if len(history) >= 4:
+            p4_x, p4_z = history[-4]
+        elif len(history) > 0:
+            p4_x, p4_z = history[0]
+        else:
+            p4_x, p4_z = cur_x, cur_z
+
+        if len(history) >= 8:
+            p8_x, p8_z = history[-8]
+        elif len(history) > 0:
+            p8_x, p8_z = history[0]
+        else:
+            p8_x, p8_z = cur_x, cur_z
+
+        return np.array([
+            _norm(p4_x, MAP_SIZE),
+            _norm(p4_z, MAP_SIZE),
+            _norm(p8_x, MAP_SIZE),
+            _norm(p8_z, MAP_SIZE),
+        ], dtype=np.float32)
 
     def _compute_abb_score(self, cur_hero_pos):
         """
@@ -1136,52 +1193,117 @@ class Preprocessor:
         penalty = -max(0.0, 1.0 - abb_score / max(self.abb_safe_score, 1e-6))
         return abb_score, penalty
 
+    def _astar_path(self, start, goal):
+        """
+        在已知且可通行区域上做 8 邻接 A*。
+        未知区域视作阻碍。
+        返回完整路径 [start, ..., goal]；若失败返回 []。
+        """
+        import heapq
 
-    def _is_reachable_in_known_map(self, start, goal):
-        """
-        仅在当前 21x21 视野内，用“hero 到目标的直线是否被阻挡”判断可达性。
-        不使用 A*，也不绕路。
-        """
+        if start is None or goal is None:
+            return []
+
         sx, sz = int(start[0]), int(start[1])
         gx, gz = int(goal[0]), int(goal[1])
 
         if not (0 <= sx < MAP_SIZE_INT and 0 <= sz < MAP_SIZE_INT):
-            return False
+            return []
         if not (0 <= gx < MAP_SIZE_INT and 0 <= gz < MAP_SIZE_INT):
-            return False
+            return []
+        if not (self.visibility_map[sx, sz] > 0 and self.passable_map[sx, sz] > 0):
+            return []
+        if not (self.visibility_map[gx, gz] > 0 and self.passable_map[gx, gz] > 0):
+            return []
 
+        def heuristic(x, z):
+            return float(np.hypot(x - gx, z - gz))
+
+        open_heap = []
+        heapq.heappush(open_heap, (heuristic(sx, sz), 0.0, (sx, sz)))
+        came_from = {}
+        g_score = {(sx, sz): 0.0}
+        visited = set()
+
+        while open_heap:
+            _, cur_g, (x, z) = heapq.heappop(open_heap)
+            if (x, z) in visited:
+                continue
+            visited.add((x, z))
+
+            if (x, z) == (gx, gz):
+                path = [(x, z)]
+                while (x, z) in came_from:
+                    x, z = came_from[(x, z)]
+                    path.append((x, z))
+                path.reverse()
+                return path
+
+            for dx, dz in DIR8:
+                nx, nz = x + dx, z + dz
+                if not (0 <= nx < MAP_SIZE_INT and 0 <= nz < MAP_SIZE_INT):
+                    continue
+                if not (self.visibility_map[nx, nz] > 0 and self.passable_map[nx, nz] > 0):
+                    continue
+
+                step_cost = 1.41421356 if (dx != 0 and dz != 0) else 1.0
+                ng = cur_g + step_cost
+                if ng + 1e-6 >= g_score.get((nx, nz), float('inf')):
+                    continue
+                g_score[(nx, nz)] = ng
+                came_from[(nx, nz)] = (x, z)
+                heapq.heappush(open_heap, (ng + heuristic(nx, nz), ng, (nx, nz)))
+
+        return []
+
+    def _maybe_replan_monster_path(self, idx, start_pos, hero_pos, step_count):
+        """
+        每 N 帧重算一次 A*；中间沿已有路径每帧推进 step_count 步。
+        """
+        if start_pos is None or hero_pos is None:
+            self.monster_predicted_paths[idx] = []
+            self.monster_replan_counters[idx] = 0
+            return None
+
+        need_replan = (
+            len(self.monster_predicted_paths[idx]) <= 1 or
+            self.monster_replan_counters[idx] <= 0
+        )
+
+        if need_replan:
+            path = self._astar_path(start_pos, hero_pos)
+            self.monster_predicted_paths[idx] = path if path else [start_pos]
+            self.monster_replan_counters[idx] = max(1, int(MONSTER_ASTAR_REPLAN_INTERVAL))
+
+        path = self.monster_predicted_paths[idx]
+        cur_pos = path[0] if path else start_pos
+
+        steps_to_take = max(1, int(step_count))
+        for _ in range(steps_to_take):
+            if len(path) > 1:
+                cur_pos = path[1]
+                path = path[1:]
+            else:
+                break
+
+        self.monster_predicted_paths[idx] = path if path else [cur_pos]
+        self.monster_replan_counters[idx] -= 1
+        return cur_pos
+
+    def _is_reachable_in_known_map(self, start, goal):
+        """
+        仅在当前已知可通行区域内判断 start 是否可达 goal。
+        用于过滤“视野内但被墙隔开”的宝箱/目标。
+        """
+        sx, sz = int(start[0]), int(start[1])
+        gx, gz = int(goal[0]), int(goal[1])
         if not self._is_global_passable(sx, sz):
             return False
         if not self._is_global_passable(gx, gz):
             return False
-
-        # 只判断 hero 当前 21x21 视野内的目标
-        if abs(gx - sx) > LOCAL_MAP_HALF or abs(gz - sz) > LOCAL_MAP_HALF:
-            return False
-
         if (sx, sz) == (gx, gz):
             return True
-
-        dx = gx - sx
-        dz = gz - sz
-        steps = max(abs(dx), abs(dz))
-        if steps <= 0:
-            return True
-
-        for t in range(1, steps + 1):
-            alpha = t / float(steps)
-            x = int(round(sx + dx * alpha))
-            z = int(round(sz + dz * alpha))
-
-            if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
-                return False
-            if self.visibility_map[x, z] == 0:
-                return False
-            if self._is_known_wall(x, z):
-                return False
-
-        return True
-
+        return len(self._astar_path((sx, sz), (gx, gz))) > 0
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -1193,7 +1315,6 @@ class Preprocessor:
         env_info = observation["env_info"]
         map_info = observation["map_info"]
         legal_act_raw = observation["legal_action"]
-        # self.logger.warning(f"legal_action: {legal_act_raw}")
 
         self.step_no = observation["step_no"]
         self.max_step = env_info.get("max_step", 200)
@@ -1207,60 +1328,75 @@ class Preprocessor:
         flash_cd_norm = _norm(hero["flash_cooldown"], MAX_FLASH_CD)
         buff_remain_norm = _norm(hero["buff_remaining_time"], MAX_BUFF_DURATION)
 
+        hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
+
+        # 先更新全局地图
         if map_info is not None:
             x0, x1, y0, y1, newly_discovered_passable_count = self.update_global_maps(hero_pos['x'], hero_pos['z'], map_info)
-
-        hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
 
         # 怪物特征
         monsters = frame_state.get("monsters", [])
         monster_feats = []
 
+        monster_reappeared = [False, False]
         for i in range(2):
             if i < len(monsters):
                 m = monsters[i]
 
-                # 视野外时，hero_relative_direction 和 hero_l2_distance 仍然可用
+                prev_pred_pos = self.predicted_monster_pos[i]
+                pred_pos = self._update_predicted_monster_pos(i, m, hero_pos, env_info)
+
                 is_in_view = float(m.get("is_in_view", 0))
+                prev_invisible = self.last_monster_invisible_1 if i == 0 else self.last_monster_invisible_2
+                monster_reappeared[i] = bool(is_in_view > 0.5 and prev_invisible)
+
+                if monster_reappeared[i] and prev_pred_pos is not None and ("pos" in m) and (m["pos"] is not None):
+                    true_mx = int(m["pos"]["x"])
+                    true_mz = int(m["pos"]["z"])
+                    pred_mx = int(prev_pred_pos[0])
+                    pred_mz = int(prev_pred_pos[1])
+                    pred_error = float(np.hypot(true_mx - pred_mx, true_mz - pred_mz))
+                    self.monster_prediction_error_sum += pred_error
+                    self.monster_prediction_error_count += 1
+                    self.monster_prediction_error_avg = self.monster_prediction_error_sum / max(1, self.monster_prediction_error_count)
+
                 if is_in_view:
-                    self.last_seen_monster_speed[i] = max(1, int(m.get("speed", 1)))
-                    m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED)
+                    m_speed_norm = _norm(m.get("speed", 1), 2)
                 else:
-                    m_speed_norm = _norm(self.last_seen_monster_speed[i], MAX_MONSTER_SPEED)
+                    m_speed_norm = _norm(self.last_seen_monster_speed[i], 2)
 
                 rel_x = 0.0
                 rel_z = 0.0
-
-                # 先给默认值：视野外时只保留粗信息
-                dir_idx = int(m.get("hero_relative_direction", 0))
-                dir_x, dir_z = DIR9_TO_VEC.get(dir_idx, (0.0, 0.0))
-
-                dist_norm = _monster_dist_bucket_norm_from_env_bucket(
-                    m.get("hero_l2_distance", OLD_MONSTER_DIST_BUCKET_MAX)
-                )
+                dir_x = 0.0
+                dir_z = 0.0
+                dist_norm = _norm(m.get("hero_l2_distance", MAX_DIST_BUCKET), MAX_DIST_BUCKET)
 
                 if is_in_view:
                     m_pos = m["pos"]
                     dx = float(m_pos["x"] - hero_pos["x"])
                     dz = float(m_pos["z"] - hero_pos["z"])
-
-                    # 精细相对位置：保留正负号
                     rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
                     rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
 
                     raw_dist = np.sqrt(dx * dx + dz * dz)
-                    dist_norm = _monster_dist_bucket_norm_from_raw(raw_dist)
-
-                    # 视野内时，用连续方向覆盖离散方向
+                    dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 10)
                     if raw_dist > 1e-6:
                         dir_x = dx / raw_dist
                         dir_z = dz / raw_dist
                 else:
+                    # 视野外的 monster feature 仍保持“模糊”表征：
+                    # 只使用环境给的相对方向 + 距离桶估计，
+                    # 不把 A* 预测位置直接注入 vector feature。
                     est_mx, est_mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
                     dx = float(est_mx - hero_pos["x"])
                     dz = float(est_mz - hero_pos["z"])
                     rel_x = float(np.clip(dx / MAP_SIZE, -1.0, 1.0))
                     rel_z = float(np.clip(dz / MAP_SIZE, -1.0, 1.0))
+                    raw_dist = np.sqrt(dx * dx + dz * dz)
+                    dist_norm = _bucketize_left(_norm(raw_dist, MAP_SIZE * 1.41), 10)
+                    if raw_dist > 1e-6:
+                        dir_x = dx / raw_dist
+                        dir_z = dz / raw_dist
 
                 monster_feats.append(
                     np.array(
@@ -1269,9 +1405,14 @@ class Preprocessor:
                     )
                 )
             else:
+                monster_reappeared[i] = False
                 monster_feats.append(np.array([0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0], dtype=np.float32))
 
+        # organ 特征
         organs = frame_state.get("organs", [])
+        if len(organs) > 0:
+            if int(organs[0].get("status", 0)) != 1:
+                self.logger.warning(f"organs: {organs}")
         self._update_organ_memory(env_info, organs, hero_pos)
         treasure_feat, treasure_items, nearest_treasure_dist_norm = self._build_target_features(
             hero_pos, self.treasure_memory, topk=2, prefer_available_only=True
@@ -1279,9 +1420,7 @@ class Preprocessor:
         buff_feat, buff_items, nearest_buff_dist_norm = self._build_target_features(
             hero_pos, self.buff_memory, topk=2, prefer_available_only=False
         )
-        cut_treasure_by_monster_angle = self._should_cut_treasure_by_monster_angle(
-            hero_pos, treasure_items, monsters
-        )
+
 
         # 地图特征
         map_feat = np.zeros((3, VIEW_MAP_SIZE, VIEW_MAP_SIZE), dtype=np.float32)
@@ -1310,12 +1449,28 @@ class Preprocessor:
             gy0=gy0,
         )
 
-        # 第二层：monster mask
-        # 规则：
-        # - 视野内：用精确位置
-        # - 视野外但怪物存在：用粗方向 + 桶距离估计位置
-        for m in monsters[:2]:
-            mx, mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
+        # 第二层：monster layer
+        # - 先把怪物追击 hero 的 A* 路径画出来
+        # - 再把当前真实/预测怪物位置画得更亮
+        for i, m in enumerate(monsters[:2]):
+            path = self.monster_predicted_paths[i] if i < len(self.monster_predicted_paths) else []
+            if path is not None and len(path) > 0:
+                _paint_path(
+                    map_feat[1],
+                    path,
+                    gx0=gx0,
+                    gy0=gy0,
+                    path_value=0.35,
+                    radius=0,
+                )
+
+            if int(m.get("is_in_view", 0)) > 0 and ("pos" in m) and (m["pos"] is not None):
+                mx = int(m["pos"]["x"])
+                mz = int(m["pos"]["z"])
+            elif self.predicted_monster_pos[i] is not None:
+                mx, mz = self.predicted_monster_pos[i]
+            else:
+                mx, mz = _estimate_monster_pos(hero_pos["x"], hero_pos["z"], m)
 
             if not (0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT):
                 continue
@@ -1335,8 +1490,8 @@ class Preprocessor:
                 continue
             if self.visibility_map[ox, oz] == 0:
                 continue
-            #if not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
-            #    continue
+            if not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
+                continue
 
             center_i = ox - gx0
             center_j = oz - gy0
@@ -1385,23 +1540,10 @@ class Preprocessor:
         boundary_cluster_feat, boundary_cluster_info = self._compute_boundary_cluster_direction_scores(
             local_passable_21_masked
         )
-        connected_opening_count_raw = int(boundary_cluster_info["connected_opening_count"])
-        connected_opening_count = _norm(connected_opening_count_raw, 5)
-        active_monster_count = min(2, max(0, len(monsters)))
-        two_monsters_in_view = bool(
-            active_monster_count >= 2
-            and float(monster_feats[0][0]) > 0.5
-            and float(monster_feats[1][0]) > 0.5
-        )
-        monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
-        is_monster_speedup = bool(monster_speedup_step > 0 and self.step_no >= monster_speedup_step)
-
-        is_dangerous = 0.0
-        if two_monsters_in_view: is_dangerous += 0.33
-        if is_monster_speedup: is_dangerous += 0.33
-        if connected_opening_count <=1: is_dangerous += 0.33
+        connected_opening_count = _norm(boundary_cluster_info["connected_opening_count"], 5)
+        is_dangerous = _norm(int(boundary_cluster_info["is_dangerous"]), 1)
         
-        situation_feat = np.array([connected_opening_count, float(is_dangerous)], dtype=np.float32)
+        situation_feat = np.array([connected_opening_count, is_dangerous], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         # 新增一组 8 维边缘连通簇方向特征，放在 ray collision 特征之后
@@ -1425,16 +1567,13 @@ class Preprocessor:
             "monster_feats_available": len(monsters),
             "progress_feats": progress_feat,
             "hero_pos": (int(hero_pos["x"]), int(hero_pos["z"])),
-            "last_action": int(last_action),
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
-            "connected_boundary_clusters": boundary_cluster_info["connected_clusters"],
-            "connected_opening_count": connected_opening_count_raw,
-            "is_dangerous": is_dangerous,
-            "two_monsters_in_view": two_monsters_in_view,
-            "is_monster_speedup": is_monster_speedup,
-            "cut_treasure_by_monster_angle": bool(cut_treasure_by_monster_angle),
+            "connected_opening_count": int(boundary_cluster_info["connected_opening_count"]),
+            "is_dangerous": bool(boundary_cluster_info["is_dangerous"]),
             "nearest_treasure_dist_norm": float(nearest_treasure_dist_norm),
             "nearest_buff_dist_norm": float(nearest_buff_dist_norm),
+            "monster_reappeared": monster_reappeared,
+            "monster_fallback_rate": float(self.monster_fallback_rate),
         }
 
         self.pos_history.append((int(hero_pos["x"]), int(hero_pos["z"])))
@@ -1448,38 +1587,37 @@ class Preprocessor:
         # 3.尽量不要撞墙。1.不要撞侧面的墙。2.不要走进死胡同。              --> 计算路径方向？
         # 4.不要原地打转。                                               --> ABB惩罚？好像做不到。方向一致性惩罚？
 
-        # 基于宝箱分数增量的奖励
+        # 基于比赛分数增量的奖励
         env_info = env_obs["observation"].get("env_info", {})
-        cur_treasure_score = float(env_info.get("treasure_score", 0.0))
-        treasure_score_gain = cur_treasure_score - self.last_treasure_score
-        self.last_treasure_score = cur_treasure_score
-
+        cur_total_score = float(env_info.get("total_score", 0.0))
+        score_gain = cur_total_score - self.last_total_score
+        self.last_total_score = cur_total_score
+        
         # 怪物 dist shaping
-
-        active_monster_count = min(2, max(0, int(reward_feats.get("monster_feats_available", 0))))
-        second_exists = active_monster_count >= 2
+        second_exists = bool(reward_feats['progress_feats'][2] < 1e-6)
 
         monster_dist_reward = 0.0
         cur_hero_pos = reward_feats.get("hero_pos")
 
         m1 = reward_feats['monster_feats'][0]
         m2 = reward_feats['monster_feats'][1]
-        is_monster_near = self._is_monster_near(
-            reward_feats["monster_feats"],
-            active_monster_count,
-            env_info,
-        )
         r1 = 0.0
         r2 = 0.0
 
+        monster_reappeared = reward_feats.get("monster_reappeared", [False, False])
+
         # monster 1
-        if self.last_monster_dist_norm_1 >= 0:
+        if monster_reappeared[0]:
+            r1 = 0.0
+        elif self.last_monster_dist_norm_1 >= 0:
             cur_dist_1 = float(m1[4])   # dist_norm
             r1 = cur_dist_1 - self.last_monster_dist_norm_1
 
         # monster 2
         if second_exists:
-            if self.last_monster_dist_norm_2 >= 0:
+            if monster_reappeared[1]:
+                r2 = 0.0
+            elif self.last_monster_dist_norm_2 >= 0:
                 cur_dist_2 = float(m2[4])   # dist_norm
                 r2 = cur_dist_2 - self.last_monster_dist_norm_2
 
@@ -1499,17 +1637,17 @@ class Preprocessor:
         if cur_invisible_1:
             los_break_reward += 0.01
         if (not self.last_monster_invisible_1) and cur_invisible_1:
-            los_break_reward += 0.8
+            los_break_reward += 1.0
         if self.last_monster_invisible_1 and (not cur_invisible_1):
-            los_break_reward -= 0.8
+            los_break_reward -= 0.5
 
         if second_exists:
             if cur_invisible_2:
                 los_break_reward += 0.01
             if (not self.last_monster_invisible_2) and cur_invisible_2:
-                los_break_reward += 0.8
+                los_break_reward += 1.0
             if self.last_monster_invisible_2 and (not cur_invisible_2):
-                los_break_reward -= 0.8
+                los_break_reward -= 1.0
         
         self.last_monster_invisible_1 = cur_invisible_1
         if second_exists:
@@ -1518,10 +1656,20 @@ class Preprocessor:
             self.last_monster_invisible_2 = False
         
         # 局势相关 reward settings
-        cur_is_dangerous = float(reward_feats.get("is_dangerous", 0))
-        cur_opening_count = int(reward_feats.get("connected_opening_count", 0))
+        cur_is_dangerous = bool(reward_feats.get("is_dangerous", False))
+        danger_to_safe_reward = 1.0 if (self.last_is_dangerous and (not cur_is_dangerous)) else 0.0
         danger_penalty = -1.0 if cur_is_dangerous else 0.0
+        self.last_is_dangerous = cur_is_dangerous
 
+        # 闪现释放奖励：仅当“危险 -> 不危险”时给大分
+        flash_reward = 0.0
+        flash_count = env_info.get("flash_count", 0)
+        if (flash_count - self.last_flash_count) > 0:
+            if danger_to_safe_reward > 0.0:
+                flash_reward = 3.0
+            else:
+                flash_reward = -0.5
+        self.last_flash_count = flash_count
 
         # 靠墙惩罚：只在 hero 周围 5x5 小窗口内查最近已知墙，减少计算量
         near_wall_penalty = 0.0
@@ -1532,99 +1680,67 @@ class Preprocessor:
                 search_radius=3,
             )
 
-        # abb 惩罚项
         abb_score, abb_penalty = self._compute_abb_penalty(cur_hero_pos)
-        
-        # 闪现只奖励受困追逃局势下的有效逃生，非受困乱闪会被惩罚。
-        flash_reward = 0.0
 
-        flash_count = int(env_info.get("flash_count", self.last_flash_count))
-        used_flash = (flash_count - self.last_flash_count) > 0
-        was_dangerous = self.last_is_dangerous
-        crossed_wall = used_flash and self._did_segment_cross_known_wall(self.last_hero_pos, cur_hero_pos)
-        cur_monster_to_agent_vecs = [
-            self._monster_to_agent_vector(m1),
-            self._monster_to_agent_vector(m2) if second_exists else None,
-        ]
-        crossed_monster = used_flash and self._did_cross_monster_by_angle(
-            cur_monster_to_agent_vecs,
-            angle_threshold=150.0,
+        # 探索奖励
+        newly_discovered_passable_count = reward_feats.get("newly_discovered_passable_count", 0)
+        if self.step_no <= 1:
+            explore_reward = 0.0
+        else: explore_reward = _norm(newly_discovered_passable_count, 40.0)
+
+        # 生存奖励
+        survive_phase_weight = 1.00 + (self.step_no / 200)
+        if abb_score < self.abb_safe_score:
+            los_break_reward = min(los_break_reward, 0.0)
+        abb_score = _norm(abb_score, self.abb_safe_score)
+
+        treasure_dist_reward = self._compute_positive_dist_shaping(
+            reward_feats.get("nearest_treasure_dist_norm", -1.0),
+            "last_treasure_dist_norm",
         )
-        flash_move_dist = None
-        if used_flash and self.last_hero_pos is not None and cur_hero_pos is not None:
-            flash_move_dist = float(np.hypot(
-                float(cur_hero_pos[0]) - float(self.last_hero_pos[0]),
-                float(cur_hero_pos[1]) - float(self.last_hero_pos[1]),
-            ))
-
-        flash_reward = 0.0
-        if used_flash:
-            if was_dangerous > 1e-6 and (crossed_wall or crossed_monster):
-                flash_reward = 8.0 * was_dangerous - 4.0 * cur_is_dangerous
-            elif was_dangerous > 0.34:
-                flash_reward = 0.3 * (_norm(flash_move_dist, 10.0) - 0.8)
-            else:
-                if flash_move_dist is None:
-                    flash_reward = -0.1
-                else:
-                    flash_reward = -0.1 - 0.3 * (0.8 - _norm(flash_move_dist, 10.0))
-
-        self.last_flash_count = flash_count
-        self.last_is_dangerous = cur_is_dangerous
-        self.last_hero_pos = cur_hero_pos
-        self.last_connected_opening_count = cur_opening_count
-        self.last_monster_to_agent_vecs = cur_monster_to_agent_vecs
+        buff_dist_reward = 0.4 * self._compute_positive_dist_shaping(
+            reward_feats.get("nearest_buff_dist_norm", -1.0),
+            "last_buff_dist_norm",
+        )
 
         # buff 奖励
-        monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
-        monster_goingto_speedup = bool(monster_speedup_step > 0 and self.step_no >= monster_speedup_step)
+        monster_goingto_speedup = bool(reward_feats['progress_feats'][3] < 100)
 
         collected_buff = int(env_info.get("collected_buff", self.last_collected_buff))
         buff_delta = float(max(0, collected_buff - self.last_collected_buff))
         self.last_collected_buff = collected_buff
         buff_pick_reward = buff_delta * (40.0 if monster_goingto_speedup else 20.0)
 
-        # 生存奖励
-        survive_reward = 1.50
-        if abb_score < self.abb_safe_score:
-            survive_reward = 0.0
-            los_break_reward = min(los_break_reward, 0.0)
-
-        # treasure dist reward
-        treasure_dist_reward = self._compute_positive_dist_shaping(
-            reward_feats.get("nearest_treasure_dist_norm", -1.0),
-            "last_treasure_dist_norm",
-        )
-
-        # buff dist reward
-        buff_dist_reward = 0.4 * self._compute_positive_dist_shaping(
-            reward_feats.get("nearest_buff_dist_norm", -1.0),
-            "last_buff_dist_norm",
-        )
-
-        # treasure score gain is ignored while a monster is too close or blocks the path to the treasure.
-        if is_monster_near or bool(reward_feats.get("cut_treasure_by_monster_angle", False)):
-            treasure_score_gain = 0.0
-            treasure_dist_reward = -0.1
-
-        # final step reward vector
+        # final step: reward vector
         dist_shaping_norm_weight = 12.8
 
-        # ============== 最终奖励向量 ==============
+        exploration_rate = 1.0
+        if cur_invisible_1 and cur_invisible_2:
+            exploration_rate = 2.0
+        else:
+            exploration_rate = 0.1
 
-        reward_config = _get_reward_config()
+        exploration_rate *= (2.0 if (not cur_is_dangerous) else 0.1)
+
+        in_stage2 = self.curriculum_episode >= CURRICULUM_STAGE2_EPISODE
+        score_gain_weight = SCORE_GAIN_WEIGHT_STAGE2 if in_stage2 else SCORE_GAIN_WEIGHT_STAGE1
+        survival_weight = SURVIVAL_WEIGHT_STAGE2 if in_stage2 else SURVIVAL_WEIGHT_STAGE1
+
         reward_vector = [
-            reward_config.treasure_score_gain * treasure_score_gain,
-            reward_config.survival * reward_config.survival_multiplier * survive_reward,
-            reward_config.los_break * los_break_reward,
-            reward_config.flash * flash_reward,
-            reward_config.wall_penalty * near_wall_penalty,
-            reward_config.abb_penalty * abb_penalty,
-            reward_config.danger_penalty * danger_penalty,
-            reward_config.treasure_dist * dist_shaping_norm_weight * treasure_dist_reward,
-            reward_config.buff_dist * dist_shaping_norm_weight * buff_dist_reward,
-            reward_config.survival_multiplier * reward_config.buff_pick * buff_pick_reward,
-            abs(reward_config.monster_dist * dist_shaping_norm_weight * monster_dist_reward),
+            score_gain_weight * score_gain,
+            survival_weight * survive_phase_weight * abb_score,
+            0.50 * los_break_reward,
+            0.25 * flash_reward,
+            0.30 * near_wall_penalty,
+            0.50 * abb_penalty,
+            0.10 * exploration_rate * explore_reward,
+            0.30 * danger_penalty,
+            0.30 * dist_shaping_norm_weight * treasure_dist_reward,
+            0.30 * dist_shaping_norm_weight * buff_dist_reward,
+            survival_weight * buff_pick_reward,
+            abs(1.50 * dist_shaping_norm_weight * monster_dist_reward),
+            self.monster_prediction_error_avg,
+            reward_feats["monster_fallback_rate"],
         ]
 
-        return reward_vector, sum(reward_vector[:-1]) + 1.50 * dist_shaping_norm_weight * monster_dist_reward
+        return reward_vector, sum(reward_vector[:-3]) + 1.50 * dist_shaping_norm_weight * monster_dist_reward

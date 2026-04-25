@@ -1,38 +1,51 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
+###########################################################################
+# Copyright © 1998 - 2026 Tencent. All Rights Reserved.
+###########################################################################
+"""
+Author: Tencent AI Arena Authors
+
+Configuration for Gorge Chase PPO.
+峡谷追猎 PPO 配置。
+"""
+
 
 class Config:
-
-    # Feature dimensions / 特征维度（共40维）
-    FEATURES = [
-        4,   # 鲁班自身
-        6,   # 怪物1
-        6,   # 怪物2
-        2,   # 宝箱特征（最近一个）
-        2,   # buff特征（最近一个）
-        16,  # 局部地图
-        16,   # 合法动作mask
-        2,   # 进度特征
+    # 非地图向量特征维度
+    VECTOR_FEATURES = [
+        4,   # hero
+        7,   # monster1
+        7,   # monster2
+        8,   # ray collision
+        8,   # boundery cluster
+        8,  # nearest 2 treasures
+        8,  # 2 buffs
+        16,  # legal action mask
+        4,   # progress
+        2,   # situation
     ]
-    FEATURE_SPLIT_SHAPE = FEATURES
-    FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)
-    DIM_OF_OBSERVATION = FEATURE_LEN
+    VECTOR_FEATURE_LEN = sum(VECTOR_FEATURES)
 
-    # Action space / 动作空间：8个移动方向
+    # 局部地图大小：完整 21x21
+    MAP_CHANNEL = 3
+    MAP_SIZE = 21
+
+    # 兼容 SampleData 里的 obs 维度定义
+    # 这里不再表示真实 flatten 后长度，只给 definition 用
+    DIM_OF_OBSERVATION = VECTOR_FEATURE_LEN + MAP_CHANNEL * MAP_SIZE * MAP_SIZE
+
     ACTION_NUM = 16
-
-    # Value head / 价值头：单头生存奖励
     VALUE_NUM = 1
 
     GAMMA = 0.99
     LAMDA = 0.95
-    INIT_LEARNING_RATE_START = 3e-4
-    BETA_START = 0.005
-    CLIP_PARAM = 0.2
-    VF_COEF = 0.5
-    GRAD_CLIP_RANGE = 0.5
-
-    PPO_EPOCH = 4
-    MINIBATCH_SIZE = 128
-    MAX_BATCH_SIZE = 4096
-    ADV_NORM_EPS = 1e-8
+    INIT_LEARNING_RATE_START = 0.0002
+    LR_SCHEDULE_ENABLE = False
+    LR_WARMUP_EPISODES = 800
+    LR_COSINE_EPISODES = 1500
+    MIN_LEARNING_RATE = 0.00001
+    BETA_START = 0.001
+    CLIP_PARAM = 0.16
+    VF_COEF = 1.0
+    GRAD_CLIP_RANGE = 1.0
