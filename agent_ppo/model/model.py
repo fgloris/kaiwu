@@ -97,16 +97,24 @@ class Model(nn.Module):
         self.map_fc = make_mlp([128 * 2 * 2, 128], dropout_p=0.0)
 
         self.fusion = make_mlp([256, 256, 128], dropout_p=self.fusion_dropout_p)
-        self.actor_head = make_mlp([128, 128, action_num], dropout_p=0.0)
+        self.escape_actor_head = make_mlp([128, 128, action_num], dropout_p=0.0)
+        self.treasure_actor_head = make_mlp([128, 128, action_num], dropout_p=0.0)
 
-        self.critic_head = nn.Sequential(
+        self.escape_critic_head = nn.Sequential(
+            make_fc_layer(128, 128),
+            nn.ReLU(),
+            nn.Dropout(self.head_dropout_p),
+            make_fc_layer(128, value_num),
+        )
+        self.treasure_critic_head = nn.Sequential(
             make_fc_layer(128, 128),
             nn.ReLU(),
             nn.Dropout(self.head_dropout_p),
             make_fc_layer(128, value_num),
         )
 
-        self.move_bias_head = make_mlp([128, 64, 8], dropout_p=0.0)
+        self.escape_move_bias_head = make_mlp([128, 64, 8], dropout_p=0.0)
+        self.treasure_move_bias_head = make_mlp([128, 64, 8], dropout_p=0.0)
 
     def _encode_vector_obs(self, vector_obs):
         hero_feat = vector_obs[:, 0:4]
@@ -144,7 +152,14 @@ class Model(nn.Module):
         )
         return self.vector_fusion(vector_hidden)
 
-    def forward(self, vector_obs, map_obs, inference=False):
+    def _apply_policy_head(self, hidden, map_hidden, actor_head, critic_head, move_bias_head):
+        logits = actor_head(hidden)
+        move_bias = move_bias_head(map_hidden)
+        logits[:, :8] = logits[:, :8] + move_bias
+        value = critic_head(hidden)
+        return logits, value
+
+    def forward(self, vector_obs, map_obs, policy_mode=None, inference=False):
         vector_hidden = self._encode_vector_obs(vector_obs)
 
         x = self.map_stem(map_obs)
@@ -158,11 +173,34 @@ class Model(nn.Module):
         hidden = torch.cat([vector_hidden, map_hidden], dim=1)
         hidden = self.fusion(hidden)
 
-        logits = self.actor_head(hidden)
-        move_bias = self.move_bias_head(map_hidden)
-        logits[:, :8] = logits[:, :8] + move_bias
+        escape_logits, escape_value = self._apply_policy_head(
+            hidden,
+            map_hidden,
+            self.escape_actor_head,
+            self.escape_critic_head,
+            self.escape_move_bias_head,
+        )
+        treasure_logits, treasure_value = self._apply_policy_head(
+            hidden,
+            map_hidden,
+            self.treasure_actor_head,
+            self.treasure_critic_head,
+            self.treasure_move_bias_head,
+        )
 
-        value = self.critic_head(hidden)
+        if policy_mode is None:
+            policy_mode = torch.full(
+                (hidden.size(0),),
+                Config.ESCAPE_POLICY_MODE,
+                dtype=torch.long,
+                device=hidden.device,
+            )
+        else:
+            policy_mode = policy_mode.view(-1).long()
+
+        treasure_mask = (policy_mode == Config.TREASURE_POLICY_MODE).view(-1, 1)
+        logits = torch.where(treasure_mask, treasure_logits, escape_logits)
+        value = torch.where(treasure_mask, treasure_value, escape_value)
         return logits, value
 
     def set_train_mode(self):

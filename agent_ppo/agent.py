@@ -61,6 +61,7 @@ class Agent(BaseAgent):
             vector_feature=list(vector_feature),
             map_feature=list(map_feature.reshape(-1)),
             legal_action=legal_action,
+            policy_mode=int(reward_feature.get("policy_mode", Config.ESCAPE_POLICY_MODE)),
         )
         reward_vector, reward = self.preprocessor.calculate_reward(env_obs, reward_feature)
         remain_info = {"reward": [reward], "reward_vector": reward_vector}
@@ -74,8 +75,9 @@ class Agent(BaseAgent):
         vector_feature = list_obs_data[0].vector_feature
         map_feature = list_obs_data[0].map_feature
         legal_action = list_obs_data[0].legal_action
+        policy_mode = int(getattr(list_obs_data[0], "policy_mode", Config.ESCAPE_POLICY_MODE))
 
-        logits, value, prob = self._run_model(vector_feature, map_feature, legal_action)
+        logits, value, prob = self._run_model(vector_feature, map_feature, legal_action, policy_mode)
 
         action = self._legal_sample(prob, use_max=False)
         d_action = self._legal_sample(prob, use_max=True)
@@ -86,6 +88,7 @@ class Agent(BaseAgent):
                 d_action=[d_action],
                 prob=list(prob),
                 value=value,
+                policy_mode=policy_mode,
             )
         ]
 
@@ -133,7 +136,7 @@ class Agent(BaseAgent):
         self.last_action = int(action[0])
         return int(action[0])
 
-    def _run_model(self, vector_feature, map_feature, legal_action):
+    def _run_model(self, vector_feature, map_feature, legal_action, policy_mode):
         """Run model inference, return logits, value, prob.
 
         执行模型推理，返回 logits、value 和动作概率。
@@ -143,9 +146,10 @@ class Agent(BaseAgent):
         vector_tensor = torch.tensor(np.array([vector_feature]), dtype=torch.float32).to(self.device)
         map_tensor = torch.tensor(np.array([map_feature]), dtype=torch.float32).to(self.device)
         map_tensor = map_tensor.view(-1, Config.MAP_CHANNEL, Config.MAP_SIZE, Config.MAP_SIZE)
+        policy_mode_tensor = torch.tensor([policy_mode], dtype=torch.long).to(self.device)
 
         with torch.no_grad():
-            logits, value = self.model(vector_tensor, map_tensor, inference=True)
+            logits, value = self.model(vector_tensor, map_tensor, policy_mode=policy_mode_tensor, inference=True)
 
         logits_np = logits.cpu().numpy()[0]
         value_np = value.cpu().numpy()[0]

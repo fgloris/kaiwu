@@ -21,10 +21,11 @@ ObsData = create_cls(
     vector_feature=None,
     map_feature=None,
     legal_action=None,
+    policy_mode=None,
 )
 
 # ActData: action, d_action(greedy), prob, value / 动作、贪心动作、概率、价值
-ActData = create_cls("ActData", action=None, d_action=None, prob=None, value=None)
+ActData = create_cls("ActData", action=None, d_action=None, prob=None, value=None, policy_mode=None)
 
 # SampleData: single-frame sample with int dims / 单帧样本（整数表示维度）
 SampleData = create_cls(
@@ -40,6 +41,7 @@ SampleData = create_cls(
     next_value=Config.VALUE_NUM,
     advantage=Config.VALUE_NUM,
     prob=Config.ACTION_NUM,
+    policy_mode=1,
 )
 
 

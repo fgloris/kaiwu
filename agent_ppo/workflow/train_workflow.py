@@ -83,7 +83,7 @@ class EpisodeRunner:
             "step_score": float(step_score),
         })
 
-    def _report_train_monitor_if_needed(self, now, reward_value, step, episode_reward_vec_sum, reward_vec_keys, force=False):
+    def _report_train_monitor_if_needed(self, now, reward_value, step, episode_reward_vec_sum, reward_vec_keys, treasure_mode_ratio, force=False):
         if not self.monitor:
             return
         if not force and now - self.last_report_monitor_time < self.monitor_report_interval:
@@ -99,6 +99,7 @@ class EpisodeRunner:
             "reward": round(float(reward_value), 4),
             "episode_steps": int(step),
             "episode_cnt": int(self.episode_cnt),
+            "treasure_mode_ratio": round(float(treasure_mode_ratio), 4),
             "learning_rate": round(float(self.current_learning_rate), 8),
             "peak_learning_rate": round(float(Config.INIT_LEARNING_RATE_START), 8),
             "min_learning_rate": round(float(Config.MIN_LEARNING_RATE), 8),
@@ -312,6 +313,7 @@ class EpisodeRunner:
                     next_value=np.zeros(1, dtype=np.float32),
                     advantage=np.zeros(1, dtype=np.float32),
                     prob=np.array(act_data.prob, dtype=np.float32),
+                    policy_mode=np.array([obs_data.policy_mode], dtype=np.float32),
                 )
                 collector.append(frame)
 

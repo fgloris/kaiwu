@@ -53,6 +53,7 @@ class Algorithm:
         legal_action = torch.stack([f.legal_action for f in list_sample_data]).to(self.device)
         act = torch.stack([f.act for f in list_sample_data]).to(self.device).view(-1, 1)
         old_prob = torch.stack([f.prob for f in list_sample_data]).to(self.device)
+        policy_mode = torch.stack([f.policy_mode for f in list_sample_data]).to(self.device).view(-1)
         reward = torch.stack([f.reward for f in list_sample_data]).to(self.device)
         advantage = torch.stack([f.advantage for f in list_sample_data]).to(self.device)
         old_value = torch.stack([f.value for f in list_sample_data]).to(self.device)
@@ -63,7 +64,7 @@ class Algorithm:
         self.model.set_train_mode()
         self.optimizer.zero_grad()
 
-        logits, value_pred = self.model(vector_obs, map_obs)
+        logits, value_pred = self.model(vector_obs, map_obs, policy_mode=policy_mode)
 
         total_loss, info_list = self._compute_loss(
             logits=logits,

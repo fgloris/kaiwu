@@ -15,6 +15,7 @@ import json
 import numpy as np
 from collections import deque
 from agent_ppo.feature.curriculum import REWARD_CONFIG
+from agent_ppo.conf.conf import Config
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
@@ -1001,6 +1002,22 @@ class Preprocessor:
             angle_threshold=angle_threshold,
         )
 
+    def _select_policy_mode(self, treasure_items, monster_feats, active_monster_count, env_info, angle_block_weight, is_dangerous):
+        has_treasure_in_view = bool(treasure_items and treasure_items[0].get("available", False))
+        if not has_treasure_in_view:
+            return Config.ESCAPE_POLICY_MODE
+
+        if self._is_monster_near(monster_feats, active_monster_count, env_info):
+            return Config.ESCAPE_POLICY_MODE
+
+        if float(angle_block_weight) > 0.0:
+            return Config.ESCAPE_POLICY_MODE
+
+        if float(is_dangerous) >= float(Config.TREASURE_POLICY_DANGER_THRESHOLD):
+            return Config.ESCAPE_POLICY_MODE
+
+        return Config.TREASURE_POLICY_MODE
+
     def _compute_positive_dist_shaping(self, cur_dist_norm, last_attr_name):
         if cur_dist_norm < 0:
             setattr(self, last_attr_name, -1.0)
@@ -1286,6 +1303,14 @@ class Preprocessor:
             active_monster_count,
             env_info,
         )
+        policy_mode = self._select_policy_mode(
+            treasure_items=treasure_items,
+            monster_feats=monster_feats,
+            active_monster_count=active_monster_count,
+            env_info=env_info,
+            angle_block_weight=cut_treasure_by_monster_angle_weight,
+            is_dangerous=is_dangerous,
+        )
 
         in_view_monster_count = _norm(monster_feats[0][0] + monster_feats[1][0], 2.0)
         
@@ -1316,6 +1341,7 @@ class Preprocessor:
             "newly_discovered_passable_count": int(newly_discovered_passable_count),
             "is_dangerous": is_dangerous,
             "is_monster_speedup": is_monster_speedup,
+            "policy_mode": int(policy_mode),
             "cut_treasure_by_monster_angle_weight": float(cut_treasure_by_monster_angle_weight),
             "nearest_treasure_dist_norm": float(nearest_treasure_dist_norm),
             "nearest_buff_dist_norm": float(nearest_buff_dist_norm),
@@ -1464,7 +1490,9 @@ class Preprocessor:
         buff_pick_reward = buff_delta * (40.0 if monster_goingto_speedup else 20.0)
 
         # 生存奖励
-        survive_reward = 1.50 # 00 + (self.step_no / 200)
+        policy_mode = int(reward_feats.get("policy_mode", Config.ESCAPE_POLICY_MODE))
+        is_treasure_mode = policy_mode == Config.TREASURE_POLICY_MODE
+        survive_reward = 0.15
         if abb_score < self.abb_safe_score:
             survive_reward = 0.0
             los_break_reward = min(los_break_reward, 0.0)
@@ -1481,19 +1509,33 @@ class Preprocessor:
             "last_buff_dist_norm",
         )
 
-        # Keep a hard cut only for near-monster danger. Angle-based blocking is softened within 30 deg.
-        if is_monster_near:
+        # Restore hard treasure cut: nearby monsters or blocking monster angle both cancel treasure incentives.
+        if is_monster_near or float(reward_feats.get("cut_treasure_by_monster_angle_weight", 0.0)) > 0.0:
             treasure_score_gain  = 0.0
             treasure_dist_reward = 0.0
+
+        if is_treasure_mode:
+            score_gain_scale = 1.00
+            survival_scale = 0.70
+            flash_scale = 0.10
+            wall_scale = 0.35
+            abb_scale = 0.35
+            danger_scale = 0.50
+            treasure_dist_scale = 1.00
+            buff_dist_scale = 0.80
+            buff_pick_scale = 0.80
+            monster_dist_scale = 0.25
         else:
-            angle_block_weight = float(np.clip(
-                reward_feats.get("cut_treasure_by_monster_angle_weight", 0.0),
-                0.0,
-                1.0,
-            ))
-            treasure_keep_weight = 1.0 - angle_block_weight
-            treasure_score_gain *= treasure_keep_weight
-            treasure_dist_reward *= treasure_keep_weight
+            score_gain_scale = 0.70
+            survival_scale = 1.00
+            flash_scale = 1.00
+            wall_scale = 1.00
+            abb_scale = 1.00
+            danger_scale = 1.00
+            treasure_dist_scale = 0.15
+            buff_dist_scale = 0.20
+            buff_pick_scale = 0.35
+            monster_dist_scale = 1.00
 
         # final step reward vector
         dist_shaping_norm_weight = 12.8
@@ -1506,18 +1548,24 @@ class Preprocessor:
         # abb penalty & wall penalty: 
 
         reward_config = _get_reward_config()
+        signed_monster_dist_term = (
+            monster_dist_scale
+            * reward_config.monster_dist
+            * dist_shaping_norm_weight
+            * monster_dist_reward
+        )
         reward_vector = [
-            reward_config.treasure_score_gain * treasure_score_gain,
-            reward_config.survival * reward_config.survival_multiplier * survive_reward,
+            score_gain_scale * reward_config.treasure_score_gain * treasure_score_gain,
+            survival_scale * reward_config.survival * reward_config.survival_multiplier * survive_reward,
             0.0, #reward_config.los_break * los_break_reward,
-            reward_config.flash * flash_reward,
-            reward_config.wall_penalty * near_wall_penalty,
-            reward_config.abb_penalty * abb_penalty,
-            reward_config.danger_penalty * danger_penalty,
-            reward_config.treasure_dist * dist_shaping_norm_weight * treasure_dist_reward,
-            reward_config.buff_dist * dist_shaping_norm_weight * buff_dist_reward,
-            reward_config.survival_multiplier * reward_config.buff_pick * buff_pick_reward,
-            abs(reward_config.monster_dist * dist_shaping_norm_weight * monster_dist_reward),
+            flash_scale * reward_config.flash * flash_reward,
+            wall_scale * reward_config.wall_penalty * near_wall_penalty,
+            abb_scale * reward_config.abb_penalty * abb_penalty,
+            danger_scale * reward_config.danger_penalty * danger_penalty,
+            treasure_dist_scale * reward_config.treasure_dist * dist_shaping_norm_weight * treasure_dist_reward,
+            buff_dist_scale * reward_config.buff_dist * dist_shaping_norm_weight * buff_dist_reward,
+            buff_pick_scale * reward_config.survival_multiplier * reward_config.buff_pick * buff_pick_reward,
+            abs(signed_monster_dist_term),
         ]
 
-        return reward_vector, sum(reward_vector[:-1]) + 1.50 * dist_shaping_norm_weight * monster_dist_reward
+        return reward_vector, sum(reward_vector[:-1]) + signed_monster_dist_term

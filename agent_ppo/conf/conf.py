@@ -12,6 +12,10 @@ Configuration for Gorge Chase PPO.
 
 
 class Config:
+    ESCAPE_POLICY_MODE = 0
+    TREASURE_POLICY_MODE = 1
+    TREASURE_POLICY_DANGER_THRESHOLD = 0.35
+
     # 非地图向量特征维度
     VECTOR_FEATURES = [
         4,   # hero
