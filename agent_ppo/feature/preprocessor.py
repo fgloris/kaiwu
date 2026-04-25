@@ -82,29 +82,6 @@ def _clip_window(x0, x1, y0, y1, size=MAP_SIZE_INT):
     y1 = min(size, y1)
     return x0, x1, y0, y1
 
-def _bucketize_left(x, num_bins, x_min=0.0, x_max=1.0):
-    """
-    将连续值桶化，并映射到所在桶的左端点。
-    例如:
-        x in [0.0, 0.2) -> 0.0
-        x in [0.2, 0.4) -> 0.2
-
-    参数:
-        x: float 或 numpy array
-        num_bins: 桶数，例如 5
-        x_min, x_max: 取值范围
-    """
-
-    x = np.asarray(x, dtype=np.float32)
-    x = np.clip(x, x_min, x_max)
-
-    step = (x_max - x_min) / float(num_bins)
-    # 处理 x == x_max 的边界
-    idx = np.floor((x - x_min) / step).astype(np.int32)
-    idx = np.clip(idx, 0, num_bins - 1)
-
-    return x_min + idx * step
-
 def _distance_bucket_to_radius(dist_bucket):
     """
     将 hero_l2_distance 桶编号(0~5)估算成一个代表距离。
@@ -237,8 +214,7 @@ class Preprocessor:
         self.last_treasure_dist_norm = -1.0
         self.last_buff_dist_norm = -1.0
 
-        # 全局物件记忆
-        self.treasure_memory = {}
+        # 全局 buff 记忆
         self.buff_memory = {}
         self.last_collected_buff = 0
         self.buff_refresh_time = 200
@@ -946,8 +922,7 @@ class Preprocessor:
         """
         self.buff_refresh_time = int(env_info.get("buff_refresh_time", self.buff_refresh_time))
 
-        # 当前帧在视野内真正出现过的 id
-        visible_treasure_ids = set()
+        # 当前帧在视野内真正出现过的 buff id
         visible_buff_ids = set()
 
         # 1) 先处理当前 organs：出现了就记为 available=True
@@ -963,14 +938,7 @@ class Preprocessor:
             available = bool(organ.get("status", 1) == 1)
 
             if sub_type == 1:
-                visible_treasure_ids.add(config_id)
-
-                mem = self.treasure_memory.setdefault(
-                    config_id,
-                    {"pos": (x, z), "available": available}
-                )
-                mem["pos"] = (x, z)
-                mem["available"] = available
+                continue
 
             elif sub_type == 2:
                 visible_buff_ids.add(config_id)
@@ -983,16 +951,7 @@ class Preprocessor:
                 mem["available"] = available
                 mem["respawn_step"] = -1
 
-        # 2) treasure: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable
-        for tid, mem in self.treasure_memory.items():
-            if not self._is_in_current_view(mem["pos"], hero_pos):
-                continue
-            if tid in visible_treasure_ids:
-                continue
-            if mem.get("available", False):
-                mem["available"] = False
-
-        # 3) buff: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable，并启动 respawn
+        # 2) buff: 在当前视野内、但这帧没出现在 organs 里的，置为 unavailable，并启动 respawn
         for bid, mem in self.buff_memory.items():
             if not self._is_in_current_view(mem["pos"], hero_pos):
                 continue
@@ -1002,12 +961,63 @@ class Preprocessor:
                 mem["available"] = False
                 mem["respawn_step"] = self.step_no + self.buff_refresh_time
 
-        # 4) buff 到刷新时间则重新可用
+        # 3) buff 到刷新时间则重新可用
         for mem in self.buff_memory.values():
             respawn_step = int(mem.get("respawn_step", -1))
             if respawn_step >= 0 and self.step_no >= respawn_step:
                 mem["available"] = True
                 mem["respawn_step"] = -1
+
+    def _build_current_treasure_features(self, hero_pos, organs, topk=2, max_dist=6):
+        hero_x = int(hero_pos["x"])
+        hero_z = int(hero_pos["z"])
+        items = []
+
+        for organ in organs:
+            if int(organ.get("sub_type", 0)) != 1:
+                continue
+            if int(organ.get("status", 0)) != 1:
+                continue
+
+            pos = organ.get("pos", {}) or {}
+            x = int(pos.get("x", -1))
+            z = int(pos.get("z", -1))
+            if not (0 <= x < MAP_SIZE_INT and 0 <= z < MAP_SIZE_INT):
+                continue
+
+            dx = float(x - hero_x)
+            dz = float(z - hero_z)
+            dist = float(np.hypot(dx, dz))
+            if dist > float(max_dist):
+                continue
+
+            dir_x = dx / dist if dist > 1e-6 else 0.0
+            dir_z = dz / dist if dist > 1e-6 else 0.0
+            dist_norm = _norm(dist, max_dist)
+            items.append({
+                "id": int(organ.get("config_id", -1)),
+                "pos": (x, z),
+                "available": True,
+                "dist": dist,
+                "dist_norm": dist_norm,
+                "feat": np.array([
+                    np.clip(dir_x, -1.0, 1.0),
+                    np.clip(dir_z, -1.0, 1.0),
+                    dist_norm,
+                    1.0,
+                ], dtype=np.float32),
+            })
+
+        items.sort(key=lambda x: x["dist"])
+
+        feat_list = []
+        for item in items[:topk]:
+            feat_list.append(item["feat"])
+        while len(feat_list) < topk:
+            feat_list.append(np.zeros(4, dtype=np.float32))
+
+        best_dist_norm = float(items[0]["dist_norm"]) if items else -1.0
+        return np.concatenate(feat_list, axis=0), items, best_dist_norm
 
     def _build_target_features(self, hero_pos, memory, topk=2, prefer_available_only=False):
         hero_x = int(hero_pos["x"])
@@ -1273,8 +1283,8 @@ class Preprocessor:
 
         organs = frame_state.get("organs", [])
         self._update_organ_memory(env_info, organs, hero_pos)
-        treasure_feat, treasure_items, nearest_treasure_dist_norm = self._build_target_features(
-            hero_pos, self.treasure_memory, topk=2, prefer_available_only=True
+        treasure_feat, treasure_items, nearest_treasure_dist_norm = self._build_current_treasure_features(
+            hero_pos, organs, topk=2, max_dist=4
         )
         buff_feat, buff_items, nearest_buff_dist_norm = self._build_target_features(
             hero_pos, self.buff_memory, topk=2, prefer_available_only=False

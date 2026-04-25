@@ -184,14 +184,14 @@ class EpisodeRunner:
     def _get_life_step_terminal_bonus(self, step):
         step = int(step)
         if step < 100:
-            return -20.0
+            return -30.0
         if step < 200:
-            return -10.0
+            return -20.0
         if step < 300:
-            return 0.0
+            return -10.0
         if step < 400:
-            return 10.0
-        return 20.0
+            return 0.0
+        return 10.0
 
     def run_episodes(self):
         """Run a single episode and yield collected samples.
@@ -282,20 +282,17 @@ class EpisodeRunner:
                 if done:
                     env_info = env_obs["observation"]["env_info"]
                     total_score = env_info.get("total_score", 0)
-                    life_step_bonus = self._get_life_step_terminal_bonus(step)
 
                     if terminated:
-                        final_reward[0] = -10.0
+                        final_reward[0] = self._get_life_step_terminal_bonus(step)
                         result_str = "FAIL"
                     else:
-                        final_reward[0] = 10.0 + 0.01 * total_score
+                        final_reward[0] = 20.0
                         result_str = "WIN"
-                    final_reward[0] += life_step_bonus
 
                     self.logger.info(
                         f"[GAMEOVER] episode:{self.episode_cnt} steps:{step} "
                         f"result:{result_str} sim_score:{total_score:.1f} "
-                        f"life_step_bonus:{life_step_bonus:.1f} "
                         f"total_reward:{total_reward:.3f}"
                     )
 
