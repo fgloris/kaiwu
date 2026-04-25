@@ -144,6 +144,13 @@ def build_monitor():
         .add_metric(metrics_name="train_min_step_score", expr="avg(train_min_step_score{})")
         .end_panel()
         .add_panel(
+            name="Treasure模式触发比例",
+            name_en="treasure_mode_ratio",
+            type="line",
+        )
+        .add_metric(metrics_name="treasure_mode_ratio", expr="avg(treasure_mode_ratio{})")
+        .end_panel()
+        .add_panel(
             name="测试地图1_2得分",
             name_en="eval_map_1_2_scores",
             type="line",

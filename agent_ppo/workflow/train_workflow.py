@@ -244,12 +244,15 @@ class EpisodeRunner:
                 "r_monster_dist_sum",
             ]
             episode_reward_vec_sum = np.zeros(len(reward_vec_keys), dtype=np.float32)
+            treasure_mode_steps = 0
 
             self.logger.info(f"Episode {self.episode_cnt} start")
 
             while not done:
                 # Predict action / Agent 推理（随机采样）
                 act_data = self.agent.predict(list_obs_data=[obs_data])[0]
+                if int(getattr(obs_data, "policy_mode", Config.ESCAPE_POLICY_MODE)) == int(Config.TREASURE_POLICY_MODE):
+                    treasure_mode_steps += 1
                 act = self.agent.action_process(act_data)
 
                 # Step env / 与环境交互
@@ -339,6 +342,7 @@ class EpisodeRunner:
                         step=step,
                         episode_reward_vec_sum=episode_reward_vec_sum,
                         reward_vec_keys=reward_vec_keys,
+                        treasure_mode_ratio=(float(treasure_mode_steps) / float(max(step, 1))),
                     )
 
                     if self.episode_cnt % self.val_every_n_episode == 0:

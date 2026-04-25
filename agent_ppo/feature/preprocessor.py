@@ -1002,13 +1002,25 @@ class Preprocessor:
             angle_threshold=angle_threshold,
         )
 
-    def _select_policy_mode(self, treasure_items, monster_feats, active_monster_count, env_info, angle_block_weight, is_dangerous):
-        has_treasure_in_view = bool(treasure_items and treasure_items[0].get("available", False))
-        if not has_treasure_in_view:
+    def _select_policy_mode(self, hero_pos, treasure_items, buff_items, monster_feats, active_monster_count, env_info, angle_block_weight, is_dangerous):
+        has_treasure_in_view = bool(
+            treasure_items
+            and treasure_items[0].get("available", False)
+            and self._is_in_current_view(treasure_items[0].get("pos", (-999, -999)), hero_pos)
+        )
+        has_buff_in_view = any(
+            bool(item.get("available", False)) and self._is_in_current_view(item.get("pos", (-999, -999)), hero_pos)
+            for item in buff_items
+        )
+        has_resource_in_view = has_treasure_in_view or has_buff_in_view
+        if not has_resource_in_view:
             return Config.ESCAPE_POLICY_MODE
 
         if self._is_monster_near(monster_feats, active_monster_count, env_info):
             return Config.ESCAPE_POLICY_MODE
+        
+        if has_buff_in_view:
+            return Config.TREASURE_POLICY_MODE
 
         if float(angle_block_weight) > 0.0:
             return Config.ESCAPE_POLICY_MODE
@@ -1304,7 +1316,9 @@ class Preprocessor:
             env_info,
         )
         policy_mode = self._select_policy_mode(
+            hero_pos=hero_pos,
             treasure_items=treasure_items,
+            buff_items=buff_items,
             monster_feats=monster_feats,
             active_monster_count=active_monster_count,
             env_info=env_info,
