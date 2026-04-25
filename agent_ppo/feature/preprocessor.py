@@ -1520,7 +1520,7 @@ class Preprocessor:
         # 局势相关 reward settings
         cur_is_dangerous = float(reward_feats.get("is_dangerous", 0))
         cur_opening_count = int(reward_feats.get("connected_opening_count", 0))
-        danger_penalty = -1.0 if cur_is_dangerous else 0.0
+        danger_penalty = -1.0 * cur_is_dangerous
 
 
         # 靠墙惩罚：只在 hero 周围 5x5 小窗口内查最近已知墙，减少计算量
@@ -1560,7 +1560,7 @@ class Preprocessor:
         flash_reward = 0.0
         if used_flash:
             if was_dangerous > 1e-6 and (crossed_wall or crossed_monster):
-                flash_reward = 8.0 * was_dangerous - 4.0 * cur_is_dangerous
+                flash_reward = 16.0 * was_dangerous - 4.0 * cur_is_dangerous
             elif was_dangerous > 0.34:
                 flash_reward = 0.3 * (_norm(flash_move_dist, 10.0) - 0.8)
             else:
@@ -1605,7 +1605,7 @@ class Preprocessor:
         # treasure score gain is ignored while a monster is too close or blocks the path to the treasure.
         if is_monster_near or bool(reward_feats.get("cut_treasure_by_monster_angle", False)):
             treasure_score_gain = 0.0
-            treasure_dist_reward = -0.1
+            treasure_dist_reward = -0.02
 
         # final step reward vector
         dist_shaping_norm_weight = 12.8
