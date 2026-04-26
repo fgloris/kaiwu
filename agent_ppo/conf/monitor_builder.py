@@ -187,6 +187,7 @@ def build_monitor():
             type="line",
         )
         .add_metric(metrics_name="through_flash_avg_survival", expr="avg(through_flash_avg_survival{})")
+        .add_metric(metrics_name="through_flash_avg_survival_reward", expr="avg(through_flash_avg_survival_reward{})")
         .end_panel()
         .end_group()
 

@@ -82,6 +82,7 @@ class Model(nn.Module):
             nn.Conv2d(64, 128, 3, padding=1),
             nn.ReLU(),
             nn.Dropout2d(self.map_dropout_p),
+            ResidualBlock(128, dropout_p=self.map_dropout_p),
         )
         nn.init.orthogonal_(self.map_stage3[0].weight.data)
         nn.init.zeros_(self.map_stage3[0].bias.data)

@@ -93,6 +93,7 @@ class EpisodeRunner:
         through_flash_count=0,
         through_flash_legal_count=0,
         through_flash_survival=None,
+        through_flash_survival_reward=0.0,
     ):
         self.train_score_window.append({
             "total_score": float(total_score),
@@ -103,6 +104,7 @@ class EpisodeRunner:
             "count": float(through_flash_count),
             "legal_count": float(through_flash_legal_count),
             "survival": None if through_flash_survival is None else float(through_flash_survival),
+            "survival_reward": float(through_flash_survival_reward),
         })
 
     def _report_train_monitor_if_needed(
@@ -130,6 +132,10 @@ class EpisodeRunner:
             [x["survival"] for x in self.through_flash_window if x["survival"] is not None],
             dtype=np.float32,
         )
+        through_flash_survival_rewards = np.asarray(
+            [x["survival_reward"] for x in self.through_flash_window],
+            dtype=np.float32,
+        )
 
         monitor_data = {
             "reward": round(float(reward_value), 4),
@@ -148,6 +154,7 @@ class EpisodeRunner:
             "train_min_step_score": round(float(np.min(step_scores)), 4),
             "through_flash_avg_count": round(float(np.mean(through_flash_counts)), 4),
             "through_flash_legal_avg_count": round(float(np.mean(through_flash_legal_counts)), 4),
+            "through_flash_avg_survival_reward": round(float(np.mean(through_flash_survival_rewards)), 4),
         }
         if through_flash_survivals.size > 0:
             monitor_data["through_flash_avg_survival"] = round(float(np.mean(through_flash_survivals)), 4)
@@ -299,7 +306,8 @@ class EpisodeRunner:
             total_reward = 0.0
             through_flash_count = 0
             through_flash_legal_count = 0
-            through_flash_first_step = None
+            through_flash_steps = []
+            flash_survival_bonus_records = []
             reward_vec_keys = [
                 "r_score_gain_sum",
                 "r_survival_gain_sum",
@@ -330,8 +338,8 @@ class EpisodeRunner:
                 model_action = int(act_data.action[0])
                 if model_action == Config.THROUGH_MONSTER_FLASH_ACTION:
                     through_flash_count += 1
-                    if through_flash_first_step is None:
-                        through_flash_first_step = step
+                    through_flash_steps.append(step)
+                    flash_survival_bonus_records.append((len(collector), step))
 
                 # Step env / 与环境交互
                 env_reward, env_obs = self.env.step(act)
@@ -373,8 +381,8 @@ class EpisodeRunner:
                         result_str = "WIN"
 
                     through_flash_survival = None
-                    if through_flash_first_step is not None:
-                        through_flash_survival = max(0, step - int(through_flash_first_step))
+                    if through_flash_steps:
+                        through_flash_survival = float(np.mean([max(0, step - int(s)) for s in through_flash_steps]))
 
                     self.logger.info(
                         f"[GAMEOVER] episode:{self.episode_cnt} steps:{step} "
@@ -400,8 +408,26 @@ class EpisodeRunner:
 
                 # Episode end / 对局结束
                 if done:
+                    through_flash_survival_reward_total = 0.0
                     if collector:
                         collector[-1].reward = collector[-1].reward + final_reward
+                        for frame_idx, flash_step in flash_survival_bonus_records:
+                            survival_after_flash = step - int(flash_step)
+                            if frame_idx >= len(collector):
+                                continue
+
+                            survival_reward = 0.0
+                            if survival_after_flash > int(Config.FLASH_SURVIVAL_BONUS_THRESHOLD):
+                                survival_reward = float(Config.FLASH_SURVIVAL_BONUS)
+                            elif terminated:
+                                survival_reward = float(Config.FLASH_SURVIVAL_PENALTY)
+
+                            if abs(survival_reward) > 1e-6:
+                                collector[frame_idx].reward = collector[frame_idx].reward + np.array(
+                                    [survival_reward],
+                                    dtype=np.float32,
+                                )
+                                through_flash_survival_reward_total += survival_reward
 
                     # Monitor report / 监控上报
                     now = time.time()
@@ -416,10 +442,11 @@ class EpisodeRunner:
                         through_flash_count=through_flash_count,
                         through_flash_legal_count=through_flash_legal_count,
                         through_flash_survival=through_flash_survival,
+                        through_flash_survival_reward=through_flash_survival_reward_total,
                     )
                     self._report_train_monitor_if_needed(
                         now=now,
-                        reward_value=total_reward + float(final_reward[0]),
+                        reward_value=total_reward + float(final_reward[0]) + through_flash_survival_reward_total,
                         step=step,
                         episode_reward_vec_sum=episode_reward_vec_sum,
                         reward_vec_keys=reward_vec_keys,
