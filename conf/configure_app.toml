@@ -20,7 +20,7 @@ reverb_remover = "reverb.selectors.Fifo"
 # reverb.selectors.Uniform：从回放缓冲区中随机均匀地选择样本，每个样本被选中的概率相同。
 # reverb.selectors.Fifo：Samples are selected in the order they were added to the replay buffer.
 # reverb.selectors.Fifo：按照先进先出从回放缓冲区中选择样本。
-reverb_sampler = "reverb.selectors.Uniform"
+reverb_sampler = "reverb.selectors.Fifo"
 
 # Control strategy for balancing data insertion and sampling in experience replay. Options: SampleToInsertRatio, MinSize
 # 控制经验回放库中数据插入与采样的动态平衡策略，可选项：SampleToInsertRatio, MinSize
@@ -34,7 +34,7 @@ reverb_sampler = "reverb.selectors.Uniform"
 # 参数reverb_samples_per_insert: 每插入1条样本允许采样的最大次数（仅SampleToInsertRatio模式生效）
 # reverb_error_buffer: Tolerance buffer for ratio constraint, similar to TCP sliding window (only for SampleToInsertRatio)
 # 参数reverb_error_buffer: 比例限制的弹性缓冲区间，类似TCP滑动窗口（仅SampleToInsertRatio模式生效）
-reverb_rate_limiter = "MinSize"
+reverb_rate_limiter = "SampleToInsertRatio"
 reverb_samples_per_insert = 5
 reverb_error_buffer = 5
 
