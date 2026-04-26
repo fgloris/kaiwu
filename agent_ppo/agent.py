@@ -130,8 +130,15 @@ class Agent(BaseAgent):
         解包 ActData 为 int 动作并记录 last_action。
         """
         action = act_data.action if is_stochastic else act_data.d_action
-        self.last_action = int(action[0])
-        return int(action[0])
+        model_action = int(action[0])
+        self.last_action = model_action
+
+        if model_action == Config.THROUGH_MONSTER_FLASH_ACTION:
+            mapped_action = getattr(self.preprocessor, "through_monster_flash_env_action", None)
+            if mapped_action is not None:
+                return int(mapped_action)
+
+        return model_action
 
     def _run_model(self, vector_feature, map_feature, legal_action):
         """Run model inference, return logits, value, prob.

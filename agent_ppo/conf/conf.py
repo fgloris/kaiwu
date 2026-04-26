@@ -21,7 +21,7 @@ class Config:
         8,   # boundery cluster
         4,  # nearest treasure
         8,  # 2 buffs
-        16,  # legal action mask
+        17,  # legal action mask
         4,   # progress
         2,   # situation
     ]
@@ -35,7 +35,8 @@ class Config:
     # 这里不再表示真实 flatten 后长度，只给 definition 用
     DIM_OF_OBSERVATION = VECTOR_FEATURE_LEN + MAP_CHANNEL * MAP_SIZE * MAP_SIZE
 
-    ACTION_NUM = 16
+    ACTION_NUM = 17
+    THROUGH_MONSTER_FLASH_ACTION = 16
     VALUE_NUM = 1
 
     GAMMA = 0.99

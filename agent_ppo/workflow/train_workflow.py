@@ -83,15 +83,37 @@ class EpisodeRunner:
         self.train_score_window = []
         self.current_learning_rate = float(Config.INIT_LEARNING_RATE_START)
         self.last_train_curriculum_stage = None
+        self.through_flash_window = []
         
-    def _append_train_score_window(self, total_score, treasure_score, step_score):
+    def _append_train_score_window(
+        self,
+        total_score,
+        treasure_score,
+        step_score,
+        through_flash_count=0,
+        through_flash_legal_count=0,
+        through_flash_survival=None,
+    ):
         self.train_score_window.append({
             "total_score": float(total_score),
             "treasure_score": float(treasure_score),
             "step_score": float(step_score),
         })
+        self.through_flash_window.append({
+            "count": float(through_flash_count),
+            "legal_count": float(through_flash_legal_count),
+            "survival": None if through_flash_survival is None else float(through_flash_survival),
+        })
 
-    def _report_train_monitor_if_needed(self, now, reward_value, step, episode_reward_vec_sum, reward_vec_keys, force=False):
+    def _report_train_monitor_if_needed(
+        self,
+        now,
+        reward_value,
+        step,
+        episode_reward_vec_sum,
+        reward_vec_keys,
+        force=False,
+    ):
         if not self.monitor:
             return
         if not force and now - self.last_report_monitor_time < self.monitor_report_interval:
@@ -102,6 +124,12 @@ class EpisodeRunner:
         total_scores = np.asarray([x["total_score"] for x in self.train_score_window], dtype=np.float32)
         treasure_scores = np.asarray([x["treasure_score"] for x in self.train_score_window], dtype=np.float32)
         step_scores = np.asarray([x["step_score"] for x in self.train_score_window], dtype=np.float32)
+        through_flash_counts = np.asarray([x["count"] for x in self.through_flash_window], dtype=np.float32)
+        through_flash_legal_counts = np.asarray([x["legal_count"] for x in self.through_flash_window], dtype=np.float32)
+        through_flash_survivals = np.asarray(
+            [x["survival"] for x in self.through_flash_window if x["survival"] is not None],
+            dtype=np.float32,
+        )
 
         monitor_data = {
             "reward": round(float(reward_value), 4),
@@ -118,13 +146,18 @@ class EpisodeRunner:
             "train_min_total_score": round(float(np.min(total_scores)), 4),
             "train_min_treasure_score": round(float(np.min(treasure_scores)), 4),
             "train_min_step_score": round(float(np.min(step_scores)), 4),
+            "through_flash_avg_count": round(float(np.mean(through_flash_counts)), 4),
+            "through_flash_legal_avg_count": round(float(np.mean(through_flash_legal_counts)), 4),
         }
+        if through_flash_survivals.size > 0:
+            monitor_data["through_flash_avg_survival"] = round(float(np.mean(through_flash_survivals)), 4)
         for i, key in enumerate(reward_vec_keys):
             monitor_data[key] = round(float(episode_reward_vec_sum[i]), 4)
 
         self.monitor.put_data({os.getpid(): monitor_data})
         self.last_report_monitor_time = now
         self.train_score_window.clear()
+        self.through_flash_window.clear()
 
     def _calc_learning_rate_by_episode(self, episode_cnt):
         peak_lr = float(Config.INIT_LEARNING_RATE_START)
@@ -264,6 +297,9 @@ class EpisodeRunner:
             done = False
             step = 0
             total_reward = 0.0
+            through_flash_count = 0
+            through_flash_legal_count = 0
+            through_flash_first_step = None
             reward_vec_keys = [
                 "r_score_gain_sum",
                 "r_survival_gain_sum",
@@ -282,9 +318,20 @@ class EpisodeRunner:
             self.logger.info(f"Episode {self.episode_cnt} start")
 
             while not done:
+                if (
+                    len(obs_data.legal_action) > Config.THROUGH_MONSTER_FLASH_ACTION
+                    and float(obs_data.legal_action[Config.THROUGH_MONSTER_FLASH_ACTION]) > 0.5
+                ):
+                    through_flash_legal_count += 1
+
                 # Predict action / Agent 推理（随机采样）
                 act_data = self.agent.predict(list_obs_data=[obs_data])[0]
                 act = self.agent.action_process(act_data)
+                model_action = int(act_data.action[0])
+                if model_action == Config.THROUGH_MONSTER_FLASH_ACTION:
+                    through_flash_count += 1
+                    if through_flash_first_step is None:
+                        through_flash_first_step = step
 
                 # Step env / 与环境交互
                 env_reward, env_obs = self.env.step(act)
@@ -325,6 +372,10 @@ class EpisodeRunner:
                         final_reward[0] = 20.0
                         result_str = "WIN"
 
+                    through_flash_survival = None
+                    if through_flash_first_step is not None:
+                        through_flash_survival = max(0, step - int(through_flash_first_step))
+
                     self.logger.info(
                         f"[GAMEOVER] episode:{self.episode_cnt} steps:{step} "
                         f"result:{result_str} sim_score:{total_score:.1f} "
@@ -362,6 +413,9 @@ class EpisodeRunner:
                         train_total_score,
                         train_treasure_score,
                         train_step_score,
+                        through_flash_count=through_flash_count,
+                        through_flash_legal_count=through_flash_legal_count,
+                        through_flash_survival=through_flash_survival,
                     )
                     self._report_train_monitor_if_needed(
                         now=now,

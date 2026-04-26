@@ -14,6 +14,7 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 import json
 import numpy as np
 from collections import deque
+from agent_ppo.conf.conf import Config
 from agent_ppo.feature.curriculum import REWARD_CONFIG
 
 # Map size / 地图尺寸（128×128）
@@ -207,6 +208,7 @@ class Preprocessor:
         self.last_hero_pos = None
         self.last_connected_opening_count = 0
         self.last_monster_to_agent_vecs = [None, None]
+        self.through_monster_flash_env_action = None
 
         self.pos_history = deque(maxlen=8)
         self.abb_safe_score = 4.0
@@ -390,7 +392,37 @@ class Preprocessor:
             legal_action = [1] * 16
         return legal_action
 
-    def _build_processed_legal_action(self, hero_x, hero_z, legal_action_mask):
+    def _nearest_through_monster_flash_action(self, hero_x, hero_z, monsters, max_dist=4.0):
+        hero_x = int(hero_x)
+        hero_z = int(hero_z)
+
+        nearest = None
+        for monster in monsters[:2]:
+            mx, mz = _estimate_monster_pos(hero_x, hero_z, monster)
+            dx = float(mx - hero_x)
+            dz = float(mz - hero_z)
+            dist = float(np.hypot(dx, dz))
+            if dist <= 1e-6 or dist >= float(max_dist):
+                continue
+            if nearest is None or dist < nearest[0]:
+                nearest = (dist, dx / dist, dz / dist)
+
+        if nearest is None:
+            return None
+
+        _, dir_x, dir_z = nearest
+        best_idx = 0
+        best_score = -1e9
+        for idx, (dx, dz) in enumerate(DIR8):
+            norm = float(np.hypot(dx, dz))
+            score = (float(dx) / norm) * dir_x + (float(dz) / norm) * dir_z
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        return 8 + best_idx
+
+    def _build_processed_legal_action(self, hero_x, hero_z, legal_action_mask, monsters=None):
         """Build a model-facing 16D legal-action feature and a hard 16D mask.
 
         - 0~7: 移动。若下一格确定撞墙/出界，则直接置 0。
@@ -403,7 +435,8 @@ class Preprocessor:
         hero_z = int(hero_z)
 
         processed_mask = [int(v) for v in legal_action_mask]
-        processed_feat = np.zeros(16, dtype=np.float32)
+        processed_feat = np.zeros(Config.ACTION_NUM, dtype=np.float32)
+        self.through_monster_flash_env_action = None
 
         for i, (dx, dz) in enumerate(DIR8):
             if processed_mask[i] <= 0:
@@ -432,9 +465,23 @@ class Preprocessor:
             max_dist = 8.0 if (dx != 0 and dz != 0) else 10.0
             processed_feat[i] = _norm(dist, max_dist)
 
+        through_action = self._nearest_through_monster_flash_action(
+            hero_x,
+            hero_z,
+            monsters or [],
+            max_dist=4.0,
+        )
+        if through_action is not None and 0 <= through_action < len(processed_mask) and processed_mask[through_action] > 0:
+            processed_mask.append(1)
+            processed_feat[Config.THROUGH_MONSTER_FLASH_ACTION] = processed_feat[through_action]
+            self.through_monster_flash_env_action = int(through_action)
+        else:
+            processed_mask.append(0)
+
         if sum(processed_mask) == 0:
-            processed_mask = [1] * 16
-            processed_feat[:] = 1.0
+            processed_mask = [1] * 16 + [0]
+            processed_feat[:16] = 1.0
+            processed_feat[Config.THROUGH_MONSTER_FLASH_ACTION] = 0.0
 
         return processed_feat, processed_mask
 
@@ -1392,6 +1439,7 @@ class Preprocessor:
             hero_pos["x"],
             hero_pos["z"],
             raw_legal_action,
+            monsters,
         )
 
         # 进度特征
@@ -1579,10 +1627,6 @@ class Preprocessor:
             self._monster_to_agent_vector(m1),
             self._monster_to_agent_vector(m2) if second_exists else None,
         ]
-        crossed_monster = used_flash and self._did_cross_monster_by_angle(
-            cur_monster_to_agent_vecs,
-            angle_threshold=150.0,
-        )
         flash_move_dist = None
         if used_flash and self.last_hero_pos is not None and cur_hero_pos is not None:
             flash_move_dist = float(np.hypot(
@@ -1592,7 +1636,9 @@ class Preprocessor:
 
         flash_reward = 0.0
         if used_flash:
-            if was_dangerous > 1e-6 and (crossed_wall or crossed_monster):
+            if int(reward_feats.get("last_action", -1)) == Config.THROUGH_MONSTER_FLASH_ACTION:
+                flash_reward = 16.0
+            elif was_dangerous > 1e-6 and crossed_wall:
                 flash_reward = 16.0 * was_dangerous - 4.0 * cur_is_dangerous
             elif was_dangerous > 0.34:
                 flash_reward = 0.3 * (_norm(flash_move_dist, 10.0) - 0.8)

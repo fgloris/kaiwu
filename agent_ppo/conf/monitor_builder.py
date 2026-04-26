@@ -170,7 +170,28 @@ def build_monitor():
         .end_group()
 
         .add_group(
-            group_name="奖励分解",
+            group_name="穿怪闪现",
+            group_name_en="through_monster_flash",
+        )
+        .add_panel(
+            name="使用次数",
+            name_en="through_flash_usage",
+            type="line",
+        )
+        .add_metric(metrics_name="through_flash_avg_count", expr="avg(through_flash_avg_count{})")
+        .add_metric(metrics_name="through_flash_legal_avg_count", expr="avg(through_flash_legal_avg_count{})")
+        .end_panel()
+        .add_panel(
+            name="闪后存活",
+            name_en="through_flash_survival",
+            type="line",
+        )
+        .add_metric(metrics_name="through_flash_avg_survival", expr="avg(through_flash_avg_survival{})")
+        .end_panel()
+        .end_group()
+
+        .add_group(
+            group_name="reward_breakdown",
             group_name_en="reward_breakdown",
         )
         .add_panel(
