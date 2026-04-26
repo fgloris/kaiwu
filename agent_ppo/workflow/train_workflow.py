@@ -259,14 +259,14 @@ class EpisodeRunner:
     def _get_life_step_terminal_bonus(self, step):
         step = int(step)
         if step < 100:
-            return -30.0
-        if step < 200:
             return -20.0
-        if step < 300:
+        if step < 200:
             return -10.0
-        if step < 400:
+        if step < 300:
             return 0.0
-        return 10.0
+        if step < 400:
+            return 10.0
+        return 20.0
 
     def run_episodes(self):
         """Run a single episode and yield collected samples.
