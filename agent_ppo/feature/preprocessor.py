@@ -422,9 +422,7 @@ class Preprocessor:
         best_score = -1e9
         for idx, (dx, dz) in enumerate(DIR8):
             action_idx = 8 + idx
-            if legal_action_mask is not None and (
-                action_idx >= len(legal_action_mask) or int(legal_action_mask[action_idx]) <= 0
-            ):
+            if action_idx >= len(legal_action_mask) or int(legal_action_mask[action_idx]) <= 0:
                 continue
 
             off_x, off_z, ok = self._flash_landing_offset(hero_x, hero_z, dx, dz)
@@ -1518,11 +1516,17 @@ class Preprocessor:
         )
         monster_speedup_step = int(env_info.get("monster_speed_boost_step", 0))
         is_monster_speedup = bool(monster_speedup_step > 0 and self.step_no >= monster_speedup_step)
+        is_monster_near = self._is_monster_near(
+            monster_feats,
+            active_monster_count,
+            env_info,
+        )
 
         is_dangerous = 0.0
-        if two_monsters_in_view: is_dangerous += 0.33
-        if is_monster_speedup: is_dangerous += 0.33
-        if connected_opening_count <=1: is_dangerous += 0.33
+        if is_monster_near: is_dangerous += 0.35
+        if two_monsters_in_view: is_dangerous += 0.20
+        if is_monster_speedup: is_dangerous += 0.30
+        if connected_opening_count <=1: is_dangerous += 0.15
         
         situation_feat = np.array([connected_opening_count, float(is_dangerous)], dtype=np.float32)
 
@@ -1678,12 +1682,10 @@ class Preprocessor:
 
         flash_reward = 0.0
         if used_flash:
-            if int(reward_feats.get("last_action", -1)) == Config.THROUGH_MONSTER_FLASH_ACTION:
-                flash_reward = 16.0
+            if was_dangerous > 0.34 and int(reward_feats.get("last_action", -1)) == Config.THROUGH_MONSTER_FLASH_ACTION:
+                flash_reward = 16.0 * was_dangerous - 4.0 * cur_is_dangerous
             elif was_dangerous > 1e-6 and crossed_wall:
                 flash_reward = 16.0 * was_dangerous - 4.0 * cur_is_dangerous
-            elif was_dangerous > 0.34:
-                flash_reward = 0.3 * (_norm(flash_move_dist, 10.0) - 0.8)
             else:
                 if flash_move_dist is None:
                     flash_reward = -0.1

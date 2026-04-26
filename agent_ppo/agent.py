@@ -135,8 +135,18 @@ class Agent(BaseAgent):
 
         if model_action == Config.THROUGH_MONSTER_FLASH_ACTION:
             mapped_action = getattr(self.preprocessor, "through_monster_flash_env_action", None)
-            if mapped_action is not None:
+            if mapped_action is not None and 0 <= int(mapped_action) < 16:
                 return int(mapped_action)
+
+        if model_action < 0 or model_action >= 16:
+            probs = np.asarray(getattr(act_data, "prob", []), dtype=np.float32)
+            if probs.shape[0] >= 16 and float(np.sum(probs[:16])) > 1e-8:
+                fallback_action = int(np.argmax(probs[:16]))
+            else:
+                fallback_action = 0
+            action[0] = fallback_action
+            self.last_action = fallback_action
+            return fallback_action
 
         return model_action
 
