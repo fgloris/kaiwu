@@ -968,7 +968,22 @@ class Preprocessor:
                 mem["available"] = True
                 mem["respawn_step"] = -1
 
-    def _build_current_treasure_features(self, hero_pos, organs, topk=2, max_dist=6):
+    def _is_treasure_too_close_to_monster(self, treasure_pos, hero_pos, monsters, min_dist=4.0):
+        tx = float(treasure_pos[0])
+        tz = float(treasure_pos[1])
+        hero_x = int(hero_pos["x"])
+        hero_z = int(hero_pos["z"])
+
+        for monster in monsters[:2]:
+            mx, mz = _estimate_monster_pos(hero_x, hero_z, monster)
+            if not (0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT):
+                continue
+            if float(np.hypot(tx - float(mx), tz - float(mz))) < float(min_dist):
+                return True
+
+        return False
+
+    def _build_current_treasure_features(self, hero_pos, organs, monsters, topk=1, max_dist=6):
         hero_x = int(hero_pos["x"])
         hero_z = int(hero_pos["z"])
         items = []
@@ -989,6 +1004,8 @@ class Preprocessor:
             dz = float(z - hero_z)
             dist = float(np.hypot(dx, dz))
             if dist > float(max_dist):
+                continue
+            if self._is_treasure_too_close_to_monster((x, z), hero_pos, monsters, min_dist=4.0):
                 continue
 
             dir_x = dx / dist if dist > 1e-6 else 0.0
@@ -1284,7 +1301,7 @@ class Preprocessor:
         organs = frame_state.get("organs", [])
         self._update_organ_memory(env_info, organs, hero_pos)
         treasure_feat, treasure_items, nearest_treasure_dist_norm = self._build_current_treasure_features(
-            hero_pos, organs, topk=2, max_dist=4
+            hero_pos, organs, monsters, topk=1, max_dist=4
         )
         buff_feat, buff_items, nearest_buff_dist_norm = self._build_target_features(
             hero_pos, self.buff_memory, topk=2, prefer_available_only=False
@@ -1334,6 +1351,8 @@ class Preprocessor:
             center_j = mz - gy0
             _paint_square(map_feat[1], center_i, center_j, radius=1, value=1.0)
 
+        selected_treasure_positions = {item["pos"] for item in treasure_items[:1]}
+
         # 第三层：当前视野内的 treasure / buff mask
         for organ in organs:
             if int(organ.get("status", 0)) != 1:
@@ -1345,12 +1364,14 @@ class Preprocessor:
                 continue
             if self.visibility_map[ox, oz] == 0:
                 continue
+            sub_type = int(organ.get("sub_type", 0))
+            if sub_type == 1 and (ox, oz) not in selected_treasure_positions:
+                continue
             if not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
                 continue
 
             center_i = ox - gx0
             center_j = oz - gy0
-            sub_type = int(organ.get("sub_type", 0))
             if sub_type == 1:
                 _paint_square(map_feat[2], center_i, center_j, radius=1, value=1.0)
             elif sub_type == 2:

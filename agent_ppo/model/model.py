@@ -56,40 +56,26 @@ class Model(nn.Module):
         )
 
         self.map_stem = nn.Sequential(
-            nn.Conv2d(Config.MAP_CHANNEL, 32, 3, padding=1),
+            nn.Conv2d(Config.MAP_CHANNEL, 24, 3, padding=1),
             nn.ReLU(),
             nn.Dropout2d(self.map_dropout_p),
         )
         nn.init.orthogonal_(self.map_stem[0].weight.data)
         nn.init.zeros_(self.map_stem[0].bias.data)
 
-        self.map_stage1 = nn.Sequential(
-            ResidualBlock(32, dropout_p=self.map_dropout_p),
+        self.map_encoder = nn.Sequential(
             nn.MaxPool2d(2),   # 21 -> 10
-        )
-
-        self.map_stage2 = nn.Sequential(
-            nn.Conv2d(32, 64, 3, padding=1),
+            nn.Conv2d(24, 48, 3, padding=1),
             nn.ReLU(),
             nn.Dropout2d(self.map_dropout_p),
-            ResidualBlock(64, dropout_p=self.map_dropout_p),
             nn.MaxPool2d(2),   # 10 -> 5
         )
-        nn.init.orthogonal_(self.map_stage2[0].weight.data)
-        nn.init.zeros_(self.map_stage2[0].bias.data)
-
-        self.map_stage3 = nn.Sequential(
-            nn.Conv2d(64, 128, 3, padding=1),
-            nn.ReLU(),
-            nn.Dropout2d(self.map_dropout_p),
-            ResidualBlock(128, dropout_p=self.map_dropout_p),
-        )
-        nn.init.orthogonal_(self.map_stage3[0].weight.data)
-        nn.init.zeros_(self.map_stage3[0].bias.data)
+        nn.init.orthogonal_(self.map_encoder[1].weight.data)
+        nn.init.zeros_(self.map_encoder[1].bias.data)
 
         self.map_pool = nn.AdaptiveAvgPool2d((3, 3))
         self.map_fc = nn.Sequential(
-            make_fc_layer(128 * 3 * 3, 128),
+            make_fc_layer(48 * 3 * 3, 128),
             nn.ReLU(),
             nn.Dropout(self.map_dropout_p),
         )
@@ -131,9 +117,7 @@ class Model(nn.Module):
         vector_hidden = self.vector_encoder(vector_obs)
 
         x = self.map_stem(map_obs)
-        x = self.map_stage1(x)
-        x = self.map_stage2(x)
-        x = self.map_stage3(x)
+        x = self.map_encoder(x)
 
         pooled = self.map_pool(x).flatten(1)
         map_hidden = self.map_fc(pooled)
