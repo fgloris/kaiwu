@@ -1007,6 +1007,8 @@ class Preprocessor:
                 continue
             if self._is_treasure_too_close_to_monster((x, z), hero_pos, monsters, min_dist=4.0):
                 continue
+            if not self._is_reachable_in_known_map((hero_x, hero_z), (x, z)):
+                continue
 
             dir_x = dx / dist if dist > 1e-6 else 0.0
             dir_z = dz / dist if dist > 1e-6 else 0.0
@@ -1367,7 +1369,7 @@ class Preprocessor:
             sub_type = int(organ.get("sub_type", 0))
             if sub_type == 1 and (ox, oz) not in selected_treasure_positions:
                 continue
-            if not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
+            if sub_type != 1 and not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
                 continue
 
             center_i = ox - gx0
