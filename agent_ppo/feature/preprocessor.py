@@ -413,6 +413,8 @@ class Preprocessor:
             dist = float(np.hypot(dx, dz))
             if dist <= 1e-6:
                 continue
+            elif dist >= 8 - min_landing_monster_dist:
+                continue
             monster_vecs.append((mx, mz, dx / dist, dz / dist))
 
         if not monster_vecs:
