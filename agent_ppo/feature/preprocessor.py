@@ -1345,8 +1345,8 @@ class Preprocessor:
                 continue
             if self.visibility_map[ox, oz] == 0:
                 continue
-            #if not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
-            #    continue
+            if not self._is_reachable_in_known_map((int(hero_pos["x"]), int(hero_pos["z"])),(ox, oz)):
+                continue
 
             center_i = ox - gx0
             center_j = oz - gy0

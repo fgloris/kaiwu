@@ -59,6 +59,13 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
 
 
 class EpisodeRunner:
+    TRAIN_CURRICULUM_PERIOD = 500
+    TRAIN_CURRICULUM_STAGES = (
+        {"talent_cooldown": 50, "monster_interval": 500, "monster_speedup": 700},
+        {"talent_cooldown": 100, "monster_interval": 300, "monster_speedup": 500},
+        {"talent_cooldown": 200, "monster_interval": 200, "monster_speedup": 300},
+    )
+
     def __init__(self, env, agent, train_usr_conf, val_usr_conf, logger, monitor):
         self.env = env
         self.agent = agent
@@ -75,6 +82,7 @@ class EpisodeRunner:
         self.val_episode_num = 10
         self.train_score_window = []
         self.current_learning_rate = float(Config.INIT_LEARNING_RATE_START)
+        self.last_train_curriculum_stage = None
         
     def _append_train_score_window(self, total_score, treasure_score, step_score):
         self.train_score_window.append({
@@ -169,6 +177,32 @@ class EpisodeRunner:
                 eval_conf["map_random"] = False
         return eval_conf
 
+    def _get_train_curriculum_stage_idx(self):
+        episode_idx = max(0, int(self.episode_cnt) - 1)
+        stage_idx = episode_idx // int(self.TRAIN_CURRICULUM_PERIOD)
+        return min(stage_idx, len(self.TRAIN_CURRICULUM_STAGES) - 1)
+
+    def _make_train_conf(self):
+        train_conf = copy.deepcopy(self.train_usr_conf)
+        stage_idx = self._get_train_curriculum_stage_idx()
+        stage_conf = self.TRAIN_CURRICULUM_STAGES[stage_idx]
+
+        if isinstance(train_conf, dict):
+            env_conf = train_conf.get("env_conf", train_conf)
+            if isinstance(env_conf, dict):
+                env_conf.update(stage_conf)
+
+        if stage_idx != self.last_train_curriculum_stage:
+            self.logger.info(
+                f"[CURRICULUM] episode:{self.episode_cnt} stage:{stage_idx + 1} "
+                f"talent_cooldown:{stage_conf['talent_cooldown']} "
+                f"monster_interval:{stage_conf['monster_interval']} "
+                f"monster_speedup:{stage_conf['monster_speedup']}"
+            )
+            self.last_train_curriculum_stage = stage_idx
+
+        return train_conf
+
     def _set_learning_rate_scale(self, scale):
         optimizer = getattr(self.agent, "optimizer", None)
         if optimizer is None:
@@ -211,7 +245,8 @@ class EpisodeRunner:
             self.episode_cnt += 1
 
             # Reset env / 重置环境
-            env_obs = self.env.reset(self.train_usr_conf)
+            train_conf = self._make_train_conf()
+            env_obs = self.env.reset(train_conf)
 
             # Disaster recovery / 容灾处理
             if handle_disaster_recovery(env_obs, self.logger):
