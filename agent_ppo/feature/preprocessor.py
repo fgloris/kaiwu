@@ -1739,7 +1739,7 @@ class Preprocessor:
         reward_vector = [
             reward_config.treasure_score_gain * treasure_score_gain,
             reward_config.survival * reward_config.survival_multiplier * survive_reward,
-            reward_config.los_break * los_break_reward,
+            0.0, #reward_config.los_break * los_break_reward,
             reward_config.flash * flash_reward,
             reward_config.wall_penalty * near_wall_penalty,
             reward_config.abb_penalty * abb_penalty,
