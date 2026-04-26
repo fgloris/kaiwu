@@ -392,53 +392,76 @@ class Preprocessor:
             legal_action = [1] * 16
         return legal_action
 
-    def _nearest_through_monster_flash_action(self, hero_x, hero_z, monsters, min_landing_monster_dist=3.0):
+    def _nearest_through_monster_flash_action(
+        self,
+        hero_x,
+        hero_z,
+        monsters,
+        legal_action_mask=None,
+        min_landing_monster_dist=2.0,
+    ):
         hero_x = int(hero_x)
         hero_z = int(hero_z)
 
-        nearest = None
-        monster_positions = []
+        monster_vecs = []
         for monster in monsters[:2]:
             mx, mz = _estimate_monster_pos(hero_x, hero_z, monster)
             if not (0 <= mx < MAP_SIZE_INT and 0 <= mz < MAP_SIZE_INT):
                 continue
-            monster_positions.append((mx, mz))
             dx = float(mx - hero_x)
             dz = float(mz - hero_z)
             dist = float(np.hypot(dx, dz))
             if dist <= 1e-6:
                 continue
-            if nearest is None or dist < nearest[0]:
-                nearest = (dist, dx / dist, dz / dist)
+            monster_vecs.append((mx, mz, dx / dist, dz / dist))
 
-        if nearest is None or not monster_positions:
+        if not monster_vecs:
             return None
 
-        _, dir_x, dir_z = nearest
-        best_idx = 0
+        best_action = None
         best_score = -1e9
         for idx, (dx, dz) in enumerate(DIR8):
-            norm = float(np.hypot(dx, dz))
-            score = (float(dx) / norm) * dir_x + (float(dz) / norm) * dir_z
+            action_idx = 8 + idx
+            if legal_action_mask is not None and (
+                action_idx >= len(legal_action_mask) or int(legal_action_mask[action_idx]) <= 0
+            ):
+                continue
+
+            off_x, off_z, ok = self._flash_landing_offset(hero_x, hero_z, dx, dz)
+            if not ok:
+                continue
+
+            landing_x = hero_x + int(off_x)
+            landing_z = hero_z + int(off_z)
+            candidate_scores = []
+            nearest_landing_monster_dist = None
+            for mx, mz, before_dir_x, before_dir_z in monster_vecs:
+                after_dx = float(mx - landing_x)
+                after_dz = float(mz - landing_z)
+                after_dist = float(np.hypot(after_dx, after_dz))
+                if nearest_landing_monster_dist is None or after_dist < nearest_landing_monster_dist:
+                    nearest_landing_monster_dist = after_dist
+                if after_dist <= 1e-6:
+                    continue
+
+                after_dir_x = after_dx / after_dist
+                after_dir_z = after_dz / after_dist
+                cos_angle = before_dir_x * after_dir_x + before_dir_z * after_dir_z
+                candidate_scores.append(-float(np.clip(cos_angle, -1.0, 1.0)))
+
+            if nearest_landing_monster_dist is None:
+                continue
+            if nearest_landing_monster_dist < float(min_landing_monster_dist):
+                continue
+            if not candidate_scores:
+                continue
+
+            score = float(np.mean(candidate_scores))
             if score > best_score:
                 best_score = score
-                best_idx = idx
+                best_action = action_idx
 
-        flash_dx, flash_dz = DIR8[best_idx]
-        off_x, off_z, ok = self._flash_landing_offset(hero_x, hero_z, flash_dx, flash_dz)
-        if not ok:
-            return None
-
-        landing_x = hero_x + int(off_x)
-        landing_z = hero_z + int(off_z)
-        nearest_landing_monster_dist = min(
-            float(np.hypot(float(landing_x - mx), float(landing_z - mz)))
-            for mx, mz in monster_positions
-        )
-        if nearest_landing_monster_dist < float(min_landing_monster_dist):
-            return None
-
-        return 8 + best_idx
+        return best_action
 
     def _build_processed_legal_action(self, hero_x, hero_z, legal_action_mask, monsters=None):
         """Build a model-facing 16D legal-action feature and a hard 16D mask.
@@ -487,7 +510,8 @@ class Preprocessor:
             hero_x,
             hero_z,
             monsters or [],
-            min_landing_monster_dist=3.0,
+            legal_action_mask=processed_mask,
+            min_landing_monster_dist=2.0,
         )
         if through_action is not None and 0 <= through_action < len(processed_mask) and processed_mask[through_action] > 0:
             processed_mask.append(1)
