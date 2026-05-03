@@ -61,8 +61,8 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
 class EpisodeRunner:
     TRAIN_CURRICULUM_PERIOD = 500
     TRAIN_CURRICULUM_STAGES = (
-        {"talent_cooldown": 50, "monster_interval": 500, "monster_speedup": 700},
-        {"talent_cooldown": 100, "monster_interval": 300, "monster_speedup": 500},
+        #{"talent_cooldown": 50, "monster_interval": 500, "monster_speedup": 700},
+        #{"talent_cooldown": 100, "monster_interval": 300, "monster_speedup": 500},
         {"talent_cooldown": 200, "monster_interval": 200, "monster_speedup": 300},
     )
 
